@@ -1,7 +1,7 @@
 # Queryfirst — design
 
 Date: 2026-10-30
-Status: draft for approval
+Status: approved 2026-10-30
 
 - **Branding:** "Queryfirst", always with a small f. npm package: `queryfirst`.
 - **Repository:** a new repo. On this machine, and anywhere else the name clashes, the folder is `queryfirst-ai`. This repo (the original C#/Visual Studio Queryfirst) stays maintained as a Visual Studio extension, independently of the new tool. This spec gets copied into the new repo when it's created (*my call*).
