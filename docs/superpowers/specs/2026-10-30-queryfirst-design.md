@@ -48,7 +48,7 @@ Simplyfirst is the first user. The first deliverable is a drop-in replacement fo
 
 ## 2a. Milestones (*my call*)
 
-- **Milestone 1 (what the first plan covers):** Postgres core, nullability and parameter analyzers, meta files, built-in TypeScript generator (pgtyped drop-in plus `@type`, `@returns`, optional `@name`), `generate`, `check`, `test`, `schema`, `init --from-pgtyped`, `bundle`, npm distribution, and the simplyfirst-app migration.
+- **Milestone 1 (what the first plan covers):** Postgres core, nullability and parameter analyzers, meta files, built-in TypeScript generator (pgtyped drop-in plus `@type`, `@returns`, optional `@name`), `generate`, `describe`, `check`, `test`, `schema`, `init --from-pgtyped`, `bundle`, npm distribution, and the simplyfirst-app migration.
 - **Later milestones, each designed and planned on its own:** SQL Server provider **with both C# and TypeScript generators**, the external generator protocol, phase 2 conversion (§13), and the bookmarks (§17).
 - Since SQL Server will need TypeScript output too, the milestone 1 TypeScript generator keeps type generation (params and results types from the meta file) separate from the runtime binding (`PreparedQuery` and IR for `@pgtyped/runtime`). That way a SQL Server runtime binding can be added later without rewriting the generator. Milestone 1 builds only the pgtyped binding.
 - Milestone 1 doesn't build later-milestone analyzers. The meta schema is versioned so it can grow (CHECK constraints, JSON shapes) without breaking anything.
@@ -203,6 +203,7 @@ Binary name `qf` (*my call*; the npm package is `queryfirst`).
 | Command | Purpose |
 |---|---|
 | `qf generate [paths…]` | **Dev DB.** Describe the queries in scope, write meta files and wrappers. Paths narrow the scope; no paths means the whole project. |
+| `qf describe [file] [--sql <text>] [--db <conn>]` | **Any DB, writes nothing, no verdict.** Runs the generate pipeline for one query (a file, `--sql`, or stdin) and prints the result: params and columns with types, nullability and required, each **with its reason**. Default output is compact text; `--json` prints the same shape as a meta file. For drafting SQL before it exists as a file, for answering "why is this nullable?", and for inspecting one query against another DB (e.g. prod). |
 | `qf check [paths…]` | **No DB, ever.** Hash-based consistency: `.sql` ↔ meta, meta ↔ wrapper, hand edits, recorded broken queries. Build step / CI. Never uses timestamps. |
 | `qf test [--db <conn>] [--manifest <file>] [--strict] [paths…]` | **Target DB.** §9 and §9a. Uses only meta files (from the tree or a manifest). |
 | `qf bundle [-o file]` | Write every meta file into one `queryfirst.manifest.json` for deployment (§9a). |
@@ -320,6 +321,7 @@ Context: simplyfirst's API routes are thin. Query results go over the wire uncha
 - Name: Queryfirst, always with a small f. npm package `queryfirst`. New repo, folder `queryfirst-ai` where names clash.
 - No database in CI. `qf test` runs in place after deployment, against the live app's datasource, as part of blue/green and the health check. It must work without knowing a project's secrets setup.
 
+- `qf describe`: the generate pipeline for one query, printing the result without writing anything and without a verdict.
 - Command names: `check` (no DB), `generate` (dev DB), `test` (target DB). `test` fails only on breaking differences, reports all, `--strict` for any difference.
 - Broken queries: error printed, recorded in the meta file, and surfaced as a single compile error in the wrapper (last good types kept).
 - This repo stays maintained as the VS extension.
