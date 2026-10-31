@@ -44,7 +44,19 @@ fn default_init() {
     assert!(text.contains("\"$schema\""), "{text}");
     assert!(text.ends_with("}\n") && !text.contains('\r'));
     assert_eq!(load_config(dir.path()).unwrap(), Config::default());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("Queryfirst init"));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("Queryfirst init"));
+    assert!(
+        err.contains(".gitattributes")
+            && err.contains("*.query.ts text eol=lf")
+            && err.contains("*.qf.json text eol=lf"),
+        "{err}"
+    );
+    // Not in the JSON output, which stays machine-readable.
+    let dir = tempfile::tempdir().unwrap();
+    let out = qf(dir.path(), &["init", "--json"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("gitattributes"));
 }
 
 #[test]

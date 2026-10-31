@@ -1,5 +1,5 @@
 //! All file writes go through here: LF only, a trailing newline, and nothing written when the
-//! bytes on disk are already right.
+//! text on disk is already right (line endings aside).
 
 use std::io;
 use std::path::Path;
@@ -14,12 +14,19 @@ pub fn normalise_text(content: &str) -> String {
 }
 
 /// Write `content` (normalised, see [`normalise_text`]) to `path` unless the file already holds
-/// exactly those bytes. Creates parent directories. Returns whether the file was written.
+/// that text, up to line endings (CRLF on disk counts as unchanged; writes are always LF). Creates parent directories. Returns whether the file was written.
 /// The write goes to a temporary sibling first and is renamed into place.
 pub fn write_if_changed(path: &Path, content: &str) -> io::Result<bool> {
     let content = normalise_text(content);
     match std::fs::read(path) {
-        Ok(existing) if existing == content.as_bytes() => return Ok(false),
+        // A file that differs only in line endings (e.g. a `core.autocrlf=true` checkout) is
+        // already right: `qf check` compares normalised text too.
+        Ok(existing)
+            if std::str::from_utf8(&existing)
+                .is_ok_and(|e| qf_sqlfile::normalise(e) == content) =>
+        {
+            return Ok(false);
+        }
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),

@@ -193,6 +193,35 @@ fn broken_keeps_last_good_types_and_adds_never() {
             "{GOLDEN}export const queryfirstError: never = \"addressBelongsToAccount: syntax error at \\\"FORM\\\"\\nline 2\";\n"
         )
     );
+
+    // A last good query with no params and no columns (a `DELETE`) still has its wrapper: the
+    // meta's statement, not its params or columns, says there is a last good version.
+    let mut void = address_meta();
+    void.name = "deleteExpired".into();
+    void.description = None;
+    void.params.clear();
+    void.columns.clear();
+    void.statement = Statement {
+        source: "DELETE FROM sessions WHERE expires < now()".into(),
+        db: "DELETE FROM sessions WHERE expires < now()".into(),
+    };
+    let good = gen_ok(&void);
+    assert!(
+        good.contains("export type IDeleteExpiredParams = void;"),
+        "{good}"
+    );
+    assert!(
+        good.contains("export type IDeleteExpiredResult = void;"),
+        "{good}"
+    );
+    let b = broken(&void, "boom");
+    let c = generate(&b, None, &opts(), &PgtypedBinding)
+        .unwrap()
+        .content;
+    assert_eq!(
+        c,
+        format!("{good}export const queryfirstError: never = \"deleteExpired: boom\";\n")
+    );
 }
 
 #[test]
@@ -212,6 +241,10 @@ fn broken_without_last_good_is_error_only() {
     let mut b = broken(&address_meta(), "boom");
     b.params.clear();
     b.columns.clear();
+    b.statement = Statement {
+        source: String::new(),
+        db: String::new(),
+    };
     let c = generate(&b, None, &opts(), &PgtypedBinding)
         .unwrap()
         .content;

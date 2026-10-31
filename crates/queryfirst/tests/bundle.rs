@@ -142,3 +142,26 @@ fn bad_config_exit_2() {
     assert_eq!(bundle(root, &[]).0, 2);
     assert!(!root.join(MANIFEST_FILE).exists());
 }
+
+#[test]
+fn orphan_metas_are_skipped_with_a_warning() {
+    let dir = project();
+    let root = dir.path();
+    // The query files of two metas exist; `z/last.psql` was deleted.
+    write(root, "app/a.sql", "SELECT 1\n");
+    write(root, "app/[id]/(queries)/get-order.psql", "SELECT 1\n");
+    let (code, stdout, _) = bundle(root, &["--json"]);
+    assert_eq!(code, 0, "{stdout}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let d = &v["diagnostics"][0];
+    assert_eq!(d["code"], "QF035");
+    assert_eq!(d["severity"], "warning");
+    assert_eq!(d["file"], "z/last.qf.json");
+    assert_eq!(v["summary"]["queries"], 2);
+    let m =
+        manifest_from_json(&std::fs::read_to_string(root.join(MANIFEST_FILE)).unwrap()).unwrap();
+    let sources: Vec<&str> = m.queries.iter().map(|q| q.source.as_str()).collect();
+    assert_eq!(sources, ["app/[id]/(queries)/get-order.psql", "app/a.sql"]);
+    let (_, _, stderr) = bundle(root, &[]);
+    assert!(stderr.contains("warning[QF035]"), "{stderr}");
+}

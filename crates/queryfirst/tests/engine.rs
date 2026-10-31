@@ -46,7 +46,7 @@ fn placeholders(sql: &str) -> usize {
 struct Fake;
 
 fn columns_for(sql: &str) -> Vec<(&'static str, &'static str)> {
-    if sql.starts_with("INSERT") {
+    if sql.starts_with("INSERT") || sql.starts_with("DELETE") {
         vec![]
     } else if sql.contains("dup") {
         vec![("id", "int4"), ("id", "int4")]
@@ -187,6 +187,26 @@ async fn second_run_writes_nothing() {
 }
 
 #[tokio::test]
+async fn crlf_outputs_on_disk_are_not_rewritten() {
+    // A `core.autocrlf=true` checkout turns every committed output into CRLF.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "app/get-customer.psql", GET);
+    write(root, "app/b.sql", "SELECT id, email FROM customers");
+    let first = run(root, &Config::default(), &[]).await;
+    assert_eq!(first.written.len(), 4);
+    for rel in &first.written {
+        let lf = read(root, rel);
+        std::fs::write(root.join(rel), lf.replace('\n', "\r\n")).unwrap();
+    }
+    let before = snapshot(root);
+    let r = run(root, &Config::default(), &[]).await;
+    assert_eq!(r.exit_code(), 0, "{:?}", r.diagnostics);
+    assert!(r.written.is_empty(), "{:?}", r.written);
+    assert_eq!(snapshot(root), before);
+}
+
+#[tokio::test]
 async fn crlf_and_lf_sources_identical_outputs() {
     let lf = tempfile::tempdir().unwrap();
     let crlf = tempfile::tempdir().unwrap();
@@ -294,6 +314,61 @@ async fn broken_without_previous_is_error_only() {
     assert!(wrapper.contains("export const queryfirstError: never = \"a: syntax error"));
     let meta = from_json(&read(root, "a.qf.json")).unwrap();
     assert!(meta.params.is_empty() && meta.columns.is_empty());
+    assert!(meta.statement.source.is_empty() && meta.statement.db.is_empty());
+}
+
+#[tokio::test]
+async fn broken_void_query_keeps_its_last_good_wrapper() {
+    // No params and no columns: the last good version is still worth keeping.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let good_sql = "/* @name deleteExpired */\nDELETE FROM sessions WHERE expires < now()\n";
+    write(root, "delete-expired.sql", good_sql);
+    assert_eq!(run(root, &Config::default(), &[]).await.exit_code(), 0);
+    let good_meta = from_json(&read(root, "delete-expired.qf.json")).unwrap();
+    assert!(good_meta.params.is_empty() && good_meta.columns.is_empty());
+    let good_wrapper = read(root, "delete-expired.query.ts");
+    assert!(good_wrapper.contains("export type IDeleteExpiredParams = void;"));
+    assert!(good_wrapper.contains("export type IDeleteExpiredResult = void;"));
+
+    write(
+        root,
+        "delete-expired.sql",
+        "/* @name deleteExpired */\nDELETE FORM sessions WHERE expires < now()\n",
+    );
+    let r = run(root, &Config::default(), &[]).await;
+    assert_eq!(r.exit_code(), 1);
+    let meta = from_json(&read(root, "delete-expired.qf.json")).unwrap();
+    assert!(matches!(meta.status, Status::Broken { .. }));
+    assert_eq!(meta.statement, good_meta.statement);
+    let wrapper = read(root, "delete-expired.query.ts");
+    let kept = wrapper
+        .strip_suffix(
+            "export const queryfirstError: never = \"deleteExpired: syntax error at or near \\\"FORM\\\"\";\n",
+        )
+        .unwrap_or_else(|| panic!("{wrapper}"));
+    assert_eq!(kept, good_wrapper);
+
+    // Still broken on the next run: nothing changes.
+    let r = run(root, &Config::default(), &[]).await;
+    assert!(r.written.is_empty(), "{:?}", r.written);
+}
+
+#[tokio::test]
+async fn utf8_bom_source_keeps_header_and_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "app/get-customer.psql", &format!("\u{FEFF}{GET}"));
+    let r = run(root, &Config::default(), &[]).await;
+    assert_eq!(r.exit_code(), 0, "{:?}", r.diagnostics);
+    assert!(
+        !r.diagnostics
+            .iter()
+            .any(|d| d.code == "QF002" || d.code == "QF003")
+    );
+    let meta = from_json(&read(root, "app/get-customer.qf.json")).unwrap();
+    assert_eq!(meta.name, "getCustomer");
+    assert_eq!(meta.sql_hash, sha256_tag(GET.as_bytes()));
 }
 
 #[tokio::test]
@@ -579,6 +654,10 @@ fn write_if_changed_only_writes_changes() {
     assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), m);
     assert!(write_if_changed(&p, "z\n").unwrap());
     assert_eq!(std::fs::read(&p).unwrap(), b"z\n");
+    // CRLF on disk with the same text: left alone.
+    std::fs::write(&p, b"z\r\n").unwrap();
+    assert!(!write_if_changed(&p, "z\n").unwrap());
+    assert_eq!(std::fs::read(&p).unwrap(), b"z\r\n");
 }
 
 #[tokio::test]
@@ -651,6 +730,41 @@ async fn scoped_run_does_not_overwrite_sibling_meta() {
     let meta = from_json(&read(root, "app/q.qf.json")).unwrap();
     assert_eq!(meta.source, "app/q.psql");
     assert!(meta.columns.is_empty());
+}
+
+#[tokio::test]
+async fn hand_written_file_at_output_path_is_not_overwritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "app/foo.psql", GET);
+    write(root, "app/foo.query.ts", "export const mine = 1;\n");
+    let before = snapshot(root);
+    let r = run(root, &Config::default(), &[]).await;
+    assert_eq!(r.exit_code(), 2);
+    let d = r.diagnostics.iter().find(|d| d.code == "QF091").unwrap();
+    assert!(
+        d.message.contains("app/foo.query.ts") && d.message.contains("not generated"),
+        "{}",
+        d.message
+    );
+    assert!(!d.message.contains("  "), "{}", d.message);
+    assert!(r.written.is_empty());
+    assert_eq!(snapshot(root), before);
+
+    // A wrapper pgtyped generated (same header, no meta) is replaced, as in a migration.
+    write(
+        root,
+        "app/foo.query.ts",
+        "/** Types generated for queries found in \"app/foo.psql\" */\nexport const old = 1;\n",
+    );
+    let r = run(root, &Config::default(), &[]).await;
+    assert_eq!(r.exit_code(), 0, "{:?}", r.diagnostics);
+    assert!(read(root, "app/foo.query.ts").contains("IGetCustomerResult"));
+    // Once recorded in the meta, later runs own it.
+    write(root, "app/foo.query.ts", "// edited by hand\n");
+    let r = run(root, &Config::default(), &[]).await;
+    assert_eq!(r.exit_code(), 0, "{:?}", r.diagnostics);
+    assert!(read(root, "app/foo.query.ts").contains("IGetCustomerResult"));
 }
 
 #[tokio::test]

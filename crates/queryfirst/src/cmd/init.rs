@@ -21,6 +21,13 @@ const PGTYPED_JSON: &str = "pgtyped-config.json";
 const PGTYPED_TS: &str = ".pgtyped.ts";
 /// Code of the notes `--from-pgtyped` prints (not an error; never changes the exit code).
 const NOTE_CODE: &str = "QF092";
+/// Printed after a successful human-readable `init`: the lines the README recommends, so a
+/// `core.autocrlf=true` checkout does not turn the generated files CRLF.
+const GITATTRIBUTES_NOTE: [&str; 3] = [
+    "note: generated files are written with LF line endings; to keep them LF on checkout, add to .gitattributes:",
+    "  *.query.ts text eol=lf",
+    "  *.qf.json text eol=lf",
+];
 
 /// The file as written. Field order is the order in the file; only needed keys are present.
 #[derive(Serialize)]
@@ -128,6 +135,9 @@ pub fn run(project: &Path, from_pgtyped: bool, json: bool) -> u8 {
         eprint!("{}", render_diagnostics(&report));
         if report.ok() {
             eprintln!("Queryfirst init: wrote {CONFIG_FILE}");
+            for line in GITATTRIBUTES_NOTE {
+                eprintln!("{line}");
+            }
         }
     }
     report.exit_code()

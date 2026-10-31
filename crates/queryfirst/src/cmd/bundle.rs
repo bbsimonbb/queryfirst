@@ -6,6 +6,11 @@
 //! metas give the same bytes. It carries the `timestamp` setting for the time zone check. A meta
 //! that cannot be read is `QF030` (as in `qf check`) and nothing is written. Broken queries are
 //! bundled as they are: `qf test` reports them (`QF049`).
+//!
+//! A meta whose query file is gone (an orphan, `QF035` in `qf check`) is left out with a
+//! warning: it describes a query the app no longer has. That needs the query files: when none of
+//! the metas' query files is present (a build stage that copied only the metas), every meta is
+//! bundled.
 
 use std::path::Path;
 
@@ -53,10 +58,29 @@ pub fn bundle_report(project: &Path, output: Option<&Path>) -> Report {
             );
         }
     };
-    report.summary.queries = rels.len();
+    let metas = read_metas(project, &rels);
+    let source_exists = |m: &QueryMeta| project.join(&m.source).is_file();
+    let tree_present = metas
+        .iter()
+        .any(|(_, m)| m.as_ref().is_ok_and(source_exists));
     let mut queries = Vec::new();
-    for (rel, meta) in read_metas(project, &rels) {
+    for (rel, meta) in metas {
         match meta {
+            Ok(m) if tree_present && !source_exists(&m) => report.push(ReportedDiagnostic {
+                file: Some(rel.clone()),
+                line: 0,
+                col: 0,
+                code: "QF035".into(),
+                severity: Severity::Warning,
+                message: format!(
+                    "{rel} has no query file ({} is gone); not bundled",
+                    m.source
+                ),
+                hint: Some(
+                    "delete it and its generated files, or run `qf generate` on the whole project"
+                        .into(),
+                ),
+            }),
             Ok(m) => queries.push(m),
             Err(e) => report.push(ReportedDiagnostic {
                 file: Some(rel.clone()),
@@ -69,6 +93,7 @@ pub fn bundle_report(project: &Path, output: Option<&Path>) -> Report {
             }),
         }
     }
+    report.summary.queries = queries.len();
     if report.ok() {
         let manifest = Manifest::new(
             ManifestSettings {

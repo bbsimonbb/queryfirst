@@ -126,8 +126,9 @@ fn render_file(
     Ok(out)
 }
 
-/// Generate the `.query.ts` for `meta`. A broken query keeps the types of `last_good` (else of
-/// its own params/columns, if any) and gets a trailing `queryfirstError: never` so that `tsc` fails.
+/// Generate the `.query.ts` for `meta`. A broken query keeps the types of `last_good` (else its
+/// own last good types, which it has when it has a statement) and gets a trailing
+/// `queryfirstError: never` so that `tsc` fails.
 pub fn generate(
     meta: &QueryMeta,
     last_good: Option<&QueryMeta>,
@@ -148,7 +149,9 @@ pub fn generate(
                     m.returns = meta.returns;
                     Some(m)
                 }
-                None if !meta.params.is_empty() || !meta.columns.is_empty() => Some(meta.clone()),
+                // The meta keeps a last good statement (possibly with no params and no
+                // columns, e.g. a `DELETE`) exactly when it has last good types.
+                None if !meta.statement.source.is_empty() => Some(meta.clone()),
                 None => None,
             };
             let mut out = match basis {
