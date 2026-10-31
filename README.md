@@ -77,9 +77,70 @@ in the generated file, with the real reason.
 
 ## Connection
 
-The connection is never stored in the config. `qf generate`, `describe` and `schema` use
-`--db`, else the variable named by `connection.env`, else `DATABASE_URL`, else the standard
-`PG*` variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, `PGSSLMODE`).
+The connection is never stored in the config, and connection details can live where Postgres
+tools keep them (`pg_service.conf`, `.pgpass`, the `PG*` variables) rather than on command lines.
+
+**Which connection string.** `qf generate`, `describe` and `schema` take the first of: `--db`;
+the variable named by `connection.env`; `DATABASE_URL`; the standard `PG*` variables (used when
+any of `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `PGPASSWORD` or `PGSERVICE` is set). `qf test`
+takes `--db`, `test.connection.env`, `DATABASE_URL` / `PG*`, then `test.connection.command` (a
+command whose standard output is the connection string). The string may be a URL or libpq
+`key=value` form.
+
+**How it is completed**, as libpq does, whichever source it came from:
+
+1. What the string itself says always wins.
+2. A service — the string's `service=` (`?service=` in a URL), else `PGSERVICE` — fills what the
+   string leaves out from its `[section]` of the first service file that has one: the file named
+   by `PGSERVICEFILE`, else `~/.pg_service.conf` (Windows: `%APPDATA%\postgresql\.pg_service.conf`);
+   then `PGSYSCONFDIR/pg_service.conf`. An unknown service is an error naming the files searched.
+3. The environment fills what is still missing: `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`,
+   `PGPASSWORD`, `PGSSLMODE`, `PGSSLROOTCERT`, `PGCONNECT_TIMEOUT`, `PGAPPNAME`, `PGPASSFILE`.
+   (As in libpq, a service value beats the environment variable for the same setting.)
+4. Defaults: host `localhost`, port `5432`, user `PGUSER` / your login name, database = user.
+5. Still no password: the password file — `passfile=` in the string, else `PGPASSFILE`, else
+   `~/.pgpass` (Windows: `%APPDATA%\postgresql\pgpass.conf`). Lines are
+   `hostname:port:database:username:password`; `*` matches anything, `\:` and `\\` escape, the
+   first matching line wins, `#` starts a comment. It is matched against the resolved host
+   (`localhost` when none was given), port, database and user. On Unix the file is ignored, with
+   a warning, if the group or others can read it (`chmod 0600 ~/.pgpass`), as libpq does.
+
+So the password precedence is: in the string > in the service > `PGPASSWORD` > the password file.
+
+Example: a password-less URL in the project's variable, the password in `.pgpass`.
+
+```sh
+# queryfirst.json: "connection": { "env": "QUERYFIRST_DATABASE_URL" }
+export QUERYFIRST_DATABASE_URL=postgresql://app@127.0.0.1:25071/appdb
+# ~/.pgpass (chmod 0600), or %APPDATA%\postgresql\pgpass.conf on Windows:
+#   127.0.0.1:25071:appdb:app:s3cret
+# ...or, for a one-off: export PGPASSWORD=s3cret
+qf generate
+```
+
+Example: a named service, with nothing but `PGSERVICE` in the environment.
+
+```ini
+# ~/.pg_service.conf (Windows: %APPDATA%\postgresql\.pg_service.conf)
+[myapp-dev]
+host=127.0.0.1
+port=25071
+dbname=appdb
+user=app
+sslmode=require
+```
+
+```sh
+# ~/.pgpass:  127.0.0.1:25071:appdb:app:s3cret
+PGSERVICE=myapp-dev qf generate        # or --db "service=myapp-dev"
+```
+
+Service files may set the options Queryfirst supports (`host`, `hostaddr`, `port`, `dbname`,
+`user`, `password`, `options`, `application_name`, `connect_timeout`, `sslmode`, `sslrootcert`,
+`passfile`, the keepalive and `target_session_attrs` options …); a libpq option it does not
+support (e.g. `sslcert`) is an error naming it. Errors about these files name the file and line,
+never a line's content.
+
 `sslmode` follows libpq (`disable`, `prefer` (default), `require`, `verify-ca`, `verify-full`);
 `no-verify` (node-postgres' spelling) is also accepted: TLS required, the certificate never
 verified. `sslrootcert` (in the URL or `key=value` string, else `PGSSLROOTCERT`) names a PEM file
@@ -87,8 +148,7 @@ of CA certificates: `verify-ca` and `verify-full` verify against it instead of t
 and, as in libpq, `require` with a root certificate verifies too (`sslrootcert=system` means the
 Mozilla roots). `verify-ca` and `verify-full` both check the host name. Other libpq options that
 Queryfirst does not support (e.g. `sslcert`, `sslkey`) are an error naming the option.
-Passwords are never printed. `qf test` resolves `--db`, `test.connection.env`, `DATABASE_URL` /
-`PG*`, then `test.connection.command` (a command whose standard output is the connection string).
+Passwords and connection strings are never printed; only the `host:port/db` target is.
 
 Note: `DATABASE_URL` wins over the `PG*` variables. A project whose environment sets both (an
 app pool URL and a direct session for describes) should name the variable it wants in
@@ -118,7 +178,7 @@ app pool URL and a direct session for describes) should name the variable it wan
 | `provider` | `"postgres"` | The only provider in milestone 1. |
 | `include` | `["**/*.psql", "**/*.sql"]` | Globs of query files, project-relative, `/` separators; `*` stays within a directory, `**` spans them. |
 | `exclude` | `["**/node_modules/**"]` | Globs to skip. Replaces the default when given. |
-| `connection.env` | — | Environment variable holding the dev connection string (then `DATABASE_URL` and `PG*` are not used). |
+| `connection.env` | — | Environment variable holding the dev connection string (then `DATABASE_URL` is not used; a service, the `PG*` variables and `.pgpass` still fill what it leaves out, e.g. the password). |
 | `pool` | `8` | Connections; describes run in parallel up to this many. |
 | `generators` | one TypeScript generator | An empty list writes meta files only. |
 | `generators[].emitTemplate` | `"{{dir}}/{{name}}.query.ts"` | Output path; `{{dir}}` is the query's directory, `{{name}}` its file name without extension. |

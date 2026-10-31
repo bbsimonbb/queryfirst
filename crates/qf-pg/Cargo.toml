@@ -19,4 +19,5 @@ webpki-roots = "1"
 strsim = "0.11.1"
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "io-util"] }

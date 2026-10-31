@@ -7,6 +7,7 @@ mod catalog;
 mod connect;
 mod describe;
 mod errors;
+mod libpq_files;
 mod nullability;
 mod required;
 mod schema_info;
@@ -15,6 +16,7 @@ pub use catalog::{Catalog, CatalogColumn, CatalogTable, WriteOp};
 pub use connect::{
     ConnError, ConnSource, DEFAULT_QUERY_TIMEOUT, KEEPALIVES_IDLE, Pool, PooledClient,
     READ_ONLY_OPTION, ResolvedConn, SslMode, connect_pool, redact, resolve_connection,
+    resolve_connection_with,
 };
 pub use describe::{Described, DescribedColumn, describe};
 pub use errors::{PgQueryError, is_connection_error, to_diagnostic};

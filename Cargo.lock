@@ -1054,6 +1054,7 @@ dependencies = [
  "qf-sqlfile",
  "rustls",
  "strsim",
+ "tempfile",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",

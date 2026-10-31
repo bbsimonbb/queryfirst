@@ -4,6 +4,7 @@
 //! [`ConnError`] never show a password or a resolved connection string.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -18,6 +19,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_postgres::Client;
 use tokio_postgres::config::Host;
 use tokio_postgres_rustls::MakeRustlsConnect;
+
+use crate::libpq_files::{PassKey, default_pgpass, find_service, pgpass_lookup, syntax_error};
 
 /// Where a connection string may come from. [`resolve_connection`] takes the first that yields
 /// a value.
@@ -220,51 +223,77 @@ impl fmt::Debug for ResolvedConn {
     }
 }
 
-fn env_nonempty(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+/// An environment lookup: the process environment, or one a test injects.
+pub(crate) type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// `name` from `env`, unless unset or blank.
+pub(crate) fn env_nonempty(env: Env, name: &str) -> Option<String> {
+    env(name).filter(|v| !v.trim().is_empty())
 }
 
-const PG_VARS: [&str; 6] = [
+fn process_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+/// Any of these makes the `PG*` variables a connection source of their own.
+const PG_SOURCE_VARS: [&str; 6] = [
     "PGHOST",
     "PGPORT",
     "PGUSER",
     "PGDATABASE",
     "PGPASSWORD",
-    "PGSSLMODE",
+    "PGSERVICE",
 ];
 
-/// Resolve the first source that yields a connection string. A helper command that fails, or a
-/// string that does not parse, is a `QF091` error rather than a fall-through.
+/// Resolve the first source that yields a connection string, against the process environment.
+/// A helper command that fails, or a string that does not parse, is a `QF091` error rather than
+/// a fall-through. See [`resolve_connection_with`].
 pub fn resolve_connection(sources: &[ConnSource]) -> Result<ResolvedConn, ConnError> {
+    resolve_connection_with(sources, &process_env)
+}
+
+/// [`resolve_connection`] with the environment read through `env` (tests inject one).
+///
+/// Whatever the source, the string is completed as libpq completes it: a `service` (the
+/// string's, else `PGSERVICE`) fills what the string leaves out from `pg_service.conf`; then the
+/// `PG*` variables fill what is still missing; then, with no password yet, the password file
+/// (`passfile`, else `PGPASSFILE`, else `~/.pgpass` / `%APPDATA%\postgresql\pgpass.conf`).
+pub fn resolve_connection_with(
+    sources: &[ConnSource],
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<ResolvedConn, ConnError> {
     for source in sources {
         match source {
             ConnSource::Explicit(s) if !s.trim().is_empty() => {
-                return parse_conn(s.trim(), "the explicit connection string");
+                return parse_conn(s.trim(), "the explicit connection string", env);
             }
             ConnSource::Explicit(_) => {}
             ConnSource::Env(name) => {
-                if let Some(v) = env_nonempty(name) {
-                    return parse_conn(v.trim(), &format!("environment variable {name}"));
+                if let Some(v) = env_nonempty(env, name) {
+                    return parse_conn(v.trim(), &format!("environment variable {name}"), env);
                 }
             }
             ConnSource::StandardEnv => {
-                if let Some(v) = env_nonempty("DATABASE_URL") {
-                    return parse_conn(v.trim(), "environment variable DATABASE_URL");
+                if let Some(v) = env_nonempty(env, "DATABASE_URL") {
+                    return parse_conn(v.trim(), "environment variable DATABASE_URL", env);
                 }
-                if PG_VARS[..5].iter().any(|v| env_nonempty(v).is_some()) {
-                    return parse_conn("", "the PG* environment variables");
+                if PG_SOURCE_VARS
+                    .iter()
+                    .any(|v| env_nonempty(env, v).is_some())
+                {
+                    return parse_conn("", "the PG* environment variables", env);
                 }
             }
             ConnSource::Command(cmd) => {
                 let out = run_helper(cmd)?;
-                return parse_conn(&out, &format!("the output of `{}`", redact(cmd)));
+                return parse_conn(&out, &format!("the output of `{}`", redact(cmd)), env);
             }
         }
     }
     Err(
         ConnError::config("no database connection configured").with_detail(
-            "pass a connection string, set DATABASE_URL or the PG* variables, \
-         or configure a connection helper command",
+            "pass a connection string, set DATABASE_URL, PGSERVICE or the PG* variables, \
+             or configure a connection helper command",
         ),
     )
 }
@@ -379,34 +408,44 @@ fn parse_sslmode(value: &str) -> Result<SslMode, ConnError> {
     })
 }
 
-/// The TLS options Queryfirst applies itself: tokio-postgres knows only disable, prefer and
-/// require, and has no `sslrootcert`.
-#[derive(Debug, Default)]
-struct TlsOptions {
-    mode: Option<SslMode>,
-    root_cert: Option<String>,
-}
+/// A connection string's options as libpq keyword/value pairs, in order. A later value for a
+/// keyword replaces an earlier one, as in libpq. Never `Debug`: it holds the password.
+#[derive(Default)]
+struct Params(Vec<(String, String)>);
 
-impl TlsOptions {
-    /// Record `key=value` if it is one of ours; `false` for any other option.
-    fn take(&mut self, key: &str, value: &str) -> Result<bool, ConnError> {
-        match key {
-            "sslmode" => self.mode = Some(parse_sslmode(value)?),
-            "sslrootcert" => self.root_cert = Some(value.to_string()),
-            _ => return Ok(false),
-        }
-        Ok(true)
+impl Params {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
-}
 
-/// Take `sslmode` and `sslrootcert` out of a URL or `key=value` connection string, returning the
-/// string without them; they are applied after parsing. Only real options count: never text
-/// inside a password or another value.
-fn take_tls_options(s: &str) -> Result<(String, TlsOptions), ConnError> {
-    if s.starts_with("postgres://") || s.starts_with("postgresql://") {
-        take_tls_options_url(s)
-    } else {
-        take_tls_options_kv(s)
+    fn has(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+
+    fn set(&mut self, key: &str, value: String) {
+        match self.0.iter_mut().find(|(k, _)| k == key) {
+            Some(slot) => slot.1 = value,
+            None => self.0.push((key.to_string(), value)),
+        }
+    }
+
+    fn take(&mut self, key: &str) -> Option<String> {
+        let i = self.0.iter().position(|(k, _)| k == key)?;
+        Some(self.0.remove(i).1)
+    }
+
+    /// The libpq `key='value' …` form, for tokio-postgres.
+    fn to_kv(&self) -> String {
+        let quote = |v: &str| v.replace('\\', "\\\\").replace('\'', "\\'");
+        let pairs: Vec<String> = self
+            .0
+            .iter()
+            .map(|(k, v)| format!("{k}='{}'", quote(v)))
+            .collect();
+        pairs.join(" ")
     }
 }
 
@@ -433,113 +472,203 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn take_tls_options_url(s: &str) -> Result<(String, TlsOptions), ConnError> {
-    // The authority (userinfo and hosts) runs from `://` to the first `/`, `?` or `#`; the query
-    // starts at the first `?` after it, so an `@` in a query value can never hide an option.
-    let authority = s.find("://").map_or(0, |i| i + 3);
-    let path = s[authority..]
-        .find(['/', '?', '#'])
-        .map_or(s.len(), |i| authority + i);
-    let mut opts = TlsOptions::default();
-    let Some(q) = s[path..].find('?').map(|i| path + i) else {
-        return Ok((s.to_string(), opts));
+/// A URL or `key=value` connection string as [`Params`]. A string that does not parse is
+/// reported with tokio-postgres' reason, which names an option but never a value.
+fn parse_params(s: &str, origin: &str) -> Result<Params, ConnError> {
+    let parsed = match s
+        .strip_prefix("postgresql://")
+        .or_else(|| s.strip_prefix("postgres://"))
+    {
+        Some(rest) => parse_url(rest),
+        None => parse_kv(s),
     };
-    let mut kept = Vec::new();
-    for pair in s[q + 1..].split('&') {
-        match pair.split_once('=') {
-            Some((k, v)) if opts.take(&percent_decode(k), &percent_decode(v))? => {}
-            // tokio-postgres reads the userinfo up to the first `@` anywhere in the URL: escape
-            // the ones in the query (it decodes them back).
-            Some(_) => kept.push(pair.replace('@', "%40")),
-            None => kept.push(pair.to_string()),
+    parsed.ok_or_else(|| match tokio_postgres::Config::from_str(s) {
+        Err(e) => invalid_string(origin, &e),
+        Ok(_) => ConnError::config(format!("invalid connection string from {origin}")),
+    })
+}
+
+/// libpq's URL form, after the scheme: `[user[:password]@][host][:port][,…][/dbname][?k=v&…]`.
+/// Only what the URL gives is set: a host without a port leaves the port to the service file,
+/// `PGPORT` or the default, as in libpq.
+fn parse_url(rest: &str) -> Option<Params> {
+    let mut p = Params::default();
+    let mut rest = rest;
+    // As libpq: the user info runs up to an `@` met before any `/`.
+    if let Some(i) = rest
+        .find(['@', '/'])
+        .filter(|&i| rest.as_bytes()[i] == b'@')
+    {
+        let userinfo = &rest[..i];
+        rest = &rest[i + 1..];
+        let (user, password) = match userinfo.split_once(':') {
+            Some((u, pw)) => (u, Some(pw)),
+            None => (userinfo, None),
+        };
+        if !user.is_empty() {
+            p.set("user", percent_decode(user));
+        }
+        if let Some(pw) = password.filter(|pw| !pw.is_empty()) {
+            p.set("password", percent_decode(pw));
         }
     }
-    let base = &s[..q];
-    let rebuilt = if kept.iter().all(|p| p.is_empty()) {
-        base.to_string()
-    } else {
-        format!("{base}?{}", kept.join("&"))
-    };
-    Ok((rebuilt, opts))
+    let (hostspec, after) = rest.split_at(rest.find(['/', '?']).unwrap_or(rest.len()));
+    rest = after;
+    if !hostspec.is_empty() {
+        let (mut hosts, mut ports) = (Vec::new(), Vec::new());
+        for chunk in hostspec.split(',') {
+            let (host, port) = match chunk.strip_prefix('[') {
+                Some(v6) => {
+                    let (host, after) = v6.split_once(']')?;
+                    match after {
+                        "" => (host, ""),
+                        _ => (host, after.strip_prefix(':')?),
+                    }
+                }
+                None => chunk.split_once(':').unwrap_or((chunk, "")),
+            };
+            hosts.push(percent_decode(host));
+            ports.push(percent_decode(port));
+        }
+        if hosts.iter().any(|h| !h.is_empty()) {
+            p.set("host", hosts.join(","));
+        }
+        if ports.iter().any(|p| !p.is_empty()) {
+            p.set("port", ports.join(","));
+        }
+    }
+    if let Some(path) = rest.strip_prefix('/') {
+        let end = path.find('?').unwrap_or(path.len());
+        if end > 0 {
+            p.set("dbname", percent_decode(&path[..end]));
+        }
+        rest = &path[end..];
+    }
+    if let Some(query) = rest.strip_prefix('?') {
+        for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+            let (k, v) = pair.split_once('=')?;
+            let (k, v) = (percent_decode(k), percent_decode(v));
+            // libpq's URL-only spelling of `sslmode=require`.
+            if k == "ssl" && v == "true" {
+                p.set("sslmode", "require".into());
+            } else {
+                p.set(&k, v);
+            }
+        }
+    }
+    Some(p)
 }
 
 /// libpq `key=value` form: whitespace-separated, spaces allowed around `=`, values optionally
-/// single-quoted, backslash escapes in both.
-fn take_tls_options_kv(s: &str) -> Result<(String, TlsOptions), ConnError> {
-    let b: Vec<(usize, char)> = s.char_indices().collect();
-    let at = |i: usize| b.get(i).map(|&(_, c)| c);
-    let byte = |i: usize| b.get(i).map_or(s.len(), |&(o, _)| o);
-    let skip_ws = |mut i: usize| {
-        while at(i).is_some_and(char::is_whitespace) {
-            i += 1;
-        }
-        i
+/// single-quoted, backslash escapes in both. `None` if malformed.
+fn parse_kv(s: &str) -> Option<Params> {
+    let mut p = Params::default();
+    let mut chars = s.chars().peekable();
+    let skip_ws = |chars: &mut std::iter::Peekable<std::str::Chars<'_>>| {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
     };
-    let mut opts = TlsOptions::default();
-    let mut out = String::new();
-    let mut i = 0;
     loop {
-        let token_start = skip_ws(i);
-        if token_start >= b.len() {
-            out.push_str(&s[byte(i)..]);
-            break;
+        skip_ws(&mut chars);
+        if chars.peek().is_none() {
+            return Some(p);
         }
-        let mut j = token_start;
-        while at(j).is_some_and(|c| c != '=' && !c.is_whitespace()) {
-            j += 1;
+        let mut key = String::new();
+        while let Some(c) = chars.next_if(|&c| c != '=' && !c.is_whitespace()) {
+            key.push(c);
         }
-        let key = &s[byte(token_start)..byte(j)];
-        j = skip_ws(j);
-        if at(j) != Some('=') {
-            // Malformed; leave the rest for tokio-postgres to reject.
-            out.push_str(&s[byte(i)..]);
-            break;
+        skip_ws(&mut chars);
+        if key.is_empty() || chars.next() != Some('=') {
+            return None;
         }
-        j = skip_ws(j + 1);
+        skip_ws(&mut chars);
         let mut value = String::new();
-        if at(j) == Some('\'') {
-            j += 1;
+        if chars.next_if_eq(&'\'').is_some() {
             loop {
-                match at(j) {
-                    None => break,
-                    Some('\'') => {
-                        j += 1;
-                        break;
-                    }
-                    Some('\\') if let Some(next) = at(j + 1) => {
-                        value.push(next);
-                        j += 2;
-                    }
-                    Some(c) => {
-                        value.push(c);
-                        j += 1;
-                    }
+                match chars.next()? {
+                    '\'' => break,
+                    '\\' => value.push(chars.next()?),
+                    c => value.push(c),
                 }
             }
         } else {
-            while let Some(c) = at(j).filter(|c| !c.is_whitespace()) {
-                if let Some(next) = at(j + 1).filter(|_| c == '\\') {
-                    value.push(next);
-                    j += 2;
-                } else {
+            while let Some(c) = chars.next_if(|c| !c.is_whitespace()) {
+                if c != '\\' {
                     value.push(c);
-                    j += 1;
+                } else if let Some(next) = chars.next() {
+                    value.push(next);
                 }
             }
         }
-        if !opts.take(key, &value)? {
-            out.push_str(&s[byte(i)..byte(j)]);
-        }
-        i = j;
+        p.set(&key, value);
     }
-    Ok((out.trim().to_string(), opts))
 }
 
-/// The libpq options Queryfirst accepts (tokio-postgres' list, plus `sslrootcert`).
+/// The libpq options Queryfirst accepts (tokio-postgres' list, plus its own).
+const SUPPORTED_KEYS: [&str; 22] = [
+    "host",
+    "hostaddr",
+    "port",
+    "user",
+    "password",
+    "dbname",
+    "options",
+    "application_name",
+    "connect_timeout",
+    "tcp_user_timeout",
+    "keepalives",
+    "keepalives_idle",
+    "keepalives_interval",
+    "keepalives_retries",
+    "target_session_attrs",
+    "channel_binding",
+    "load_balance_hosts",
+    "sslnegotiation",
+    "sslmode",
+    "sslrootcert",
+    "passfile",
+    "service",
+];
+
+/// libpq options Queryfirst does not support. In a service file these are named in the error;
+/// any other unknown keyword is reported by line only, since it may be a mistyped secret.
+const UNSUPPORTED_LIBPQ_KEYS: [&str; 30] = [
+    "sslcert",
+    "sslkey",
+    "sslpassword",
+    "sslcertmode",
+    "sslcrl",
+    "sslcrldir",
+    "sslsni",
+    "sslcompression",
+    "ssl_min_protocol_version",
+    "ssl_max_protocol_version",
+    "requiressl",
+    "requirepeer",
+    "require_auth",
+    "gssencmode",
+    "gsslib",
+    "gssdelegation",
+    "krbsrvname",
+    "client_encoding",
+    "fallback_application_name",
+    "replication",
+    "min_protocol_version",
+    "max_protocol_version",
+    "scram_client_key",
+    "scram_server_key",
+    "oauth_issuer",
+    "oauth_client_id",
+    "oauth_client_secret",
+    "oauth_scope",
+    "authtype",
+    "tty",
+];
+
+/// The same list as [`SUPPORTED_KEYS`], for messages.
 const SUPPORTED_OPTIONS: &str = "host, hostaddr, port, user, password, dbname, options, \
      application_name, connect_timeout, tcp_user_timeout, keepalives, keepalives_idle, \
      keepalives_interval, keepalives_retries, target_session_attrs, channel_binding, \
-     load_balance_hosts, sslnegotiation, sslmode and sslrootcert";
+     load_balance_hosts, sslnegotiation, sslmode, sslrootcert, passfile and service";
 
 /// The error for a string tokio-postgres rejected. Its parse errors name the offending option,
 /// never its value.
@@ -559,77 +688,161 @@ fn invalid_string(origin: &str, e: &tokio_postgres::Error) -> ConnError {
         .with_detail(cause.unwrap_or_else(|| e.to_string()))
 }
 
-fn parse_conn(s: &str, origin: &str) -> Result<ResolvedConn, ConnError> {
-    let (s, tls) = take_tls_options(s)?;
-    let mut config = if s.is_empty() {
-        tokio_postgres::Config::new()
-    } else {
-        tokio_postgres::Config::from_str(&s).map_err(|e| invalid_string(origin, &e))?
-    };
-
-    // Fill what the string left out from the libpq environment, as libpq does.
-    if config.get_hosts().is_empty() {
-        let hosts = env_nonempty("PGHOST").unwrap_or_else(|| "localhost".into());
-        for h in hosts.split(',') {
-            config.host(h.trim());
+/// Fill what `p` leaves out from the service `name`'s section of `pg_service.conf`.
+fn apply_service(p: &mut Params, name: &str, env: Env) -> Result<(), ConnError> {
+    let svc = find_service(env, name)?;
+    let at = |line: usize| format!("service `{name}` ({}, line {line})", svc.file.display());
+    for e in &svc.entries {
+        if e.key == "service" {
+            return Err(ConnError::config(format!(
+                "nested service specifications are not supported in {}",
+                at(e.line)
+            )));
+        }
+        if !SUPPORTED_KEYS.contains(&e.key.as_str()) {
+            if UNSUPPORTED_LIBPQ_KEYS.contains(&e.key.as_str()) {
+                return Err(ConnError::config(format!(
+                    "unsupported connection option `{}` in {}",
+                    e.key,
+                    at(e.line)
+                ))
+                .with_hint(format!(
+                    "remove `{}` from the service; Queryfirst supports {SUPPORTED_OPTIONS}",
+                    e.key
+                )));
+            }
+            return Err(syntax_error(&svc.file, e.line)
+                .with_detail(format!("not a connection option, in service `{name}`")));
+        }
+        // The first value in the section wins, as in libpq.
+        if !p.has(&e.key) {
+            p.set(&e.key, e.value.clone());
         }
     }
-    if config.get_ports().is_empty() {
-        let port = match env_nonempty("PGPORT") {
-            Some(p) => p
-                .trim()
-                .parse::<u16>()
-                .map_err(|_| ConnError::config("invalid PGPORT"))?,
-            None => 5432,
-        };
-        config.port(port);
-    }
-    if config.get_user().is_none() {
-        let user = env_nonempty("PGUSER")
-            .or_else(|| env_nonempty("USER"))
-            .or_else(|| env_nonempty("USERNAME"))
-            .unwrap_or_else(|| "postgres".into());
-        config.user(user);
-    }
-    if config.get_dbname().is_none() {
-        let db = env_nonempty("PGDATABASE")
-            .unwrap_or_else(|| config.get_user().unwrap_or_default().to_string());
-        config.dbname(db);
-    }
-    if config.get_password().is_none()
-        && let Some(pw) = env_nonempty("PGPASSWORD")
-    {
-        config.password(pw);
-    }
+    Ok(())
+}
 
-    let ssl = match tls.mode {
-        Some(m) => m,
-        // A mode tokio-postgres parsed itself (only if ours missed it) is still the string's,
-        // which beats the environment: never silently weaken it to `prefer`.
-        None => match config.get_ssl_mode() {
-            tokio_postgres::config::SslMode::Disable => SslMode::Disable,
-            tokio_postgres::config::SslMode::Require => SslMode::Require,
-            _ => match env_nonempty("PGSSLMODE") {
-                Some(v) => SslMode::parse(v.trim()).ok_or_else(|| {
-                    ConnError::config(format!("invalid PGSSLMODE `{}`", v.trim()))
-                })?,
-                None => SslMode::Prefer,
-            },
-        },
+/// Fill what `p` still leaves out from the libpq environment variables, then the defaults.
+fn apply_env(p: &mut Params, env: Env) -> Result<(), ConnError> {
+    let var = |name: &str| env_nonempty(env, name);
+    if !p.has("host") {
+        let hosts = match var("PGHOST") {
+            Some(h) => h.split(',').map(str::trim).collect::<Vec<_>>().join(","),
+            None => "localhost".into(),
+        };
+        p.set("host", hosts);
+    }
+    if !p.has("port") {
+        let port = match var("PGPORT") {
+            Some(v) => {
+                let parts: Vec<&str> = v.split(',').map(str::trim).collect();
+                if parts
+                    .iter()
+                    .any(|x| !x.is_empty() && x.parse::<u16>().is_err())
+                {
+                    return Err(ConnError::config("invalid PGPORT"));
+                }
+                parts.join(",")
+            }
+            None => "5432".into(),
+        };
+        p.set("port", port);
+    }
+    if !p.has("user") {
+        let user = var("PGUSER")
+            .or_else(|| var("USER"))
+            .or_else(|| var("USERNAME"))
+            .unwrap_or_else(|| "postgres".into());
+        p.set("user", user);
+    }
+    if !p.has("dbname") {
+        let db = var("PGDATABASE").unwrap_or_else(|| p.get("user").unwrap_or_default().into());
+        p.set("dbname", db);
+    }
+    if !p.has("password")
+        && let Some(pw) = var("PGPASSWORD")
+    {
+        p.set("password", pw);
+    }
+    if !p.has("sslmode")
+        && let Some(v) = var("PGSSLMODE")
+    {
+        let v = v.trim();
+        if SslMode::parse(v).is_none() {
+            return Err(ConnError::config(format!("invalid PGSSLMODE `{v}`")));
+        }
+        p.set("sslmode", v.into());
+    }
+    if !p.has("connect_timeout")
+        && let Some(v) = var("PGCONNECT_TIMEOUT")
+    {
+        let v = v.trim();
+        if v.parse::<i64>().is_err() {
+            return Err(ConnError::config("invalid PGCONNECT_TIMEOUT"));
+        }
+        p.set("connect_timeout", v.into());
+    }
+    for (key, name) in [
+        ("sslrootcert", "PGSSLROOTCERT"),
+        ("application_name", "PGAPPNAME"),
+        ("passfile", "PGPASSFILE"),
+    ] {
+        if !p.has(key)
+            && let Some(v) = var(name)
+        {
+            p.set(key, v);
+        }
+    }
+    Ok(())
+}
+
+fn parse_conn(s: &str, origin: &str, env: Env) -> Result<ResolvedConn, ConnError> {
+    let mut p = parse_params(s, origin)?;
+    let service = p.take("service").or_else(|| env_nonempty(env, "PGSERVICE"));
+    if let Some(name) = service.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        apply_service(&mut p, name, env)?;
+    }
+    apply_env(&mut p, env)?;
+
+    // Ours: tokio-postgres knows only disable, prefer and require, and has no sslrootcert or
+    // passfile.
+    let ssl = match p.take("sslmode") {
+        Some(v) => parse_sslmode(&v)?,
+        None => SslMode::Prefer,
     };
+    let root_cert = p.take("sslrootcert");
+    let passfile = p.take("passfile").filter(|f| !f.is_empty());
+    let mut config =
+        tokio_postgres::Config::from_str(&p.to_kv()).map_err(|e| invalid_string(origin, &e))?;
     config.ssl_mode(match ssl {
         SslMode::Disable => tokio_postgres::config::SslMode::Disable,
         SslMode::Prefer => tokio_postgres::config::SslMode::Prefer,
         _ => tokio_postgres::config::SslMode::Require,
     });
-    let root_cert = tls.root_cert.or_else(|| env_nonempty("PGSSLROOTCERT"));
 
-    let host = match &config.get_hosts()[0] {
-        Host::Tcp(h) => h.clone(),
+    let host = match config.get_hosts().first() {
+        Some(Host::Tcp(h)) => h.clone(),
         #[cfg(unix)]
-        Host::Unix(p) => p.display().to_string(),
+        Some(Host::Unix(p)) => p.display().to_string(),
+        None => "localhost".into(),
     };
-    let port = config.get_ports()[0];
+    let port = config.get_ports().first().copied().unwrap_or(5432);
+
+    // No password from the string, the service or PGPASSWORD: the password file.
+    if config.get_password().is_none_or(<[u8]>::is_empty)
+        && let Some(file) = passfile.map(PathBuf::from).or_else(|| default_pgpass(env))
+    {
+        let key = PassKey {
+            host: if host.is_empty() { "localhost" } else { &host },
+            port: &port.to_string(),
+            dbname: config.get_dbname().unwrap_or_default(),
+            user: config.get_user().unwrap_or_default(),
+        };
+        if let Some(pw) = pgpass_lookup(&file, &key) {
+            config.password(pw);
+        }
+    }
+
     let host_port = format!("{host}:{port}");
     let display_target = format!("{host_port}/{}", config.get_dbname().unwrap_or_default());
     Ok(ResolvedConn {
@@ -830,7 +1043,9 @@ impl Pool {
 }
 
 /// Open `size` (at least 1) connections concurrently. Any failure, or not finishing within
-/// `timeout`, is `QF090` "cannot reach database at host:port". Needs a tokio runtime.
+/// `timeout`, is `QF090` "cannot reach database at host:port". A `connect_timeout` from the
+/// connection (string, service or `PGCONNECT_TIMEOUT`) replaces `timeout`; as in libpq, less
+/// than 2 seconds counts as 2. Needs a tokio runtime.
 pub async fn connect_pool(
     c: &ResolvedConn,
     size: usize,
@@ -838,6 +1053,10 @@ pub async fn connect_pool(
 ) -> Result<Pool, ConnError> {
     let size = size.max(1);
     let tls = tls_connector(c.ssl, c.root_cert.as_deref())?;
+    let timeout = c
+        .config
+        .get_connect_timeout()
+        .map_or(timeout, |t| (*t).max(Duration::from_secs(2)));
     let mut config = c.config.clone();
     config.connect_timeout(timeout);
     config.keepalives(true);
@@ -900,3 +1119,7 @@ pub(crate) fn describe_pg_error(e: &tokio_postgres::Error) -> String {
     }
     s
 }
+
+#[cfg(test)]
+#[path = "connect_tests.rs"]
+mod tests;
