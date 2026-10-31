@@ -39,22 +39,32 @@ second run writes nothing. On Windows with `core.autocrlf=true`, add a `.gitattr
 *.qf.json text eol=lf
 ```
 
-otherwise a fresh checkout turns them CRLF and the next `qf generate` rewrites every file.
+(`qf init` prints these lines too). Without them a fresh checkout turns the files CRLF; `qf
+generate` and `qf check` compare text with line endings normalised, so that is not a change and
+nothing is rewritten, but the files stay CRLF on disk.
+
+Query files may use LF or CRLF line endings and may start with a UTF-8 byte order mark: both are
+ignored, by the parser and by the hash recorded in the meta file. A file with no SQL statement
+(empty, or only a header comment) is an error (`QF001`).
 
 ## Commands
 
 | Command | Database | What it does |
 |---|---|---|
 | `qf generate [paths…]` | dev | Describe the queries in scope; write meta files and wrappers. No paths: the whole project, which also deletes the output of deleted queries. |
-| `qf describe [file] [--sql <text>]` | any | Describe one query (a file, `--sql`, or stdin) and print params and columns with types, nullability and the reason for each. Writes nothing. |
+| `qf describe [file] [--sql <text>]` | any | Describe one query (a file, `--sql`, or stdin) and print params and columns with types, nullability and the reason for each. Writes nothing. Read-only sessions. |
 | `qf check [paths…]` | none | Hash-based consistency of query ↔ meta ↔ wrapper, hand edits and recorded broken queries. |
 | `qf test [--manifest <file>] [--strict] [paths…]` | target | Re-describe every committed query against another database (e.g. production) and report every difference; fails on breaking ones. Read-only sessions. |
 | `qf bundle [-o <file>]` | none | Write every meta file into one `queryfirst.manifest.json`, so `qf test --manifest` can run where the sources are not (a deploy step). It is a build artifact: don't commit it. |
-| `qf schema [tables…]` | dev | No args: list tables and views. With tables: columns, defaults, keys, foreign keys and enums. |
+| `qf schema [tables…]` | any | No args: list tables and views. With tables: columns, defaults, keys, foreign keys and enums. Read-only sessions. |
 | `qf init [--from-pgtyped]` | none | Write `queryfirst.json`; never overwrites one. |
 
-Every command takes `--project <dir>` (default: the nearest ancestor holding `queryfirst.json`)
-and `--json` (machine-readable output). Commands that connect take `--db <conn>`.
+Every command takes `--project <dir>` and `--json` (machine-readable output). `--project`
+defaults to the nearest ancestor holding `queryfirst.json`, except for `qf init` and
+`qf test --manifest`, which default to the current directory (a new project, a deployment
+image). Commands that connect take `--db <conn>`, and their human-readable output (on stderr)
+names the database they used as `database: host:port/db` (never the user or password), so a run
+against the wrong database is noticed.
 
 Diagnostics read `path:line:col: error[QFnnn]: message`, then an optional `hint:` line. Exit
 codes: `0` ok, `1` query, check or test errors, `2` usage, configuration or connection error.
@@ -70,7 +80,13 @@ in the generated file, with the real reason.
 The connection is never stored in the config. `qf generate`, `describe` and `schema` use
 `--db`, else the variable named by `connection.env`, else `DATABASE_URL`, else the standard
 `PG*` variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, `PGSSLMODE`).
-`sslmode` follows libpq (`disable`, `prefer` (default), `require`, `verify-ca`, `verify-full`).
+`sslmode` follows libpq (`disable`, `prefer` (default), `require`, `verify-ca`, `verify-full`);
+`no-verify` (node-postgres' spelling) is also accepted: TLS required, the certificate never
+verified. `sslrootcert` (in the URL or `key=value` string, else `PGSSLROOTCERT`) names a PEM file
+of CA certificates: `verify-ca` and `verify-full` verify against it instead of the Mozilla roots,
+and, as in libpq, `require` with a root certificate verifies too (`sslrootcert=system` means the
+Mozilla roots). `verify-ca` and `verify-full` both check the host name. Other libpq options that
+Queryfirst does not support (e.g. `sslcert`, `sslkey`) are an error naming the option.
 Passwords are never printed. `qf test` resolves `--db`, `test.connection.env`, `DATABASE_URL` /
 `PG*`, then `test.connection.command` (a command whose standard output is the connection string).
 

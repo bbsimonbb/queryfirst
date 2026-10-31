@@ -7,7 +7,7 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, statSync, unlinkS
 import { join, resolve, dirname, basename, extname, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const SKIP_DIRS = new Set(["node_modules", ".git", ".next"]);
+const SKIP_DIRS = new Set(["node_modules", ".git", ".next", "dist", "build", ".worktrees", "coverage"]);
 const HEADER_RE = /\/\*\s*@name\s+([A-Za-z_]\w*)/g;
 
 export function kebab(name) {
@@ -26,7 +26,7 @@ export function pascal(name) {
     .join("");
 }
 
-/** Sorted list of files under root (skipping node_modules/.git/.next), optionally filtered by extension. */
+/** Sorted list of files under root (skipping SKIP_DIRS: dependencies, VCS, build output, worktrees, coverage), optionally filtered by extension. */
 export function walk(root, exts) {
   const out = [];
   const rec = (dir) => {

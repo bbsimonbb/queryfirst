@@ -286,3 +286,14 @@ test("corpus smoke (read-only, QF_PGTYPED_CORPUS)", { skip: !process.env.QF_PGTY
   assert.ok(specifiers > 1000);
   assert.equal(rewritten + manual, specifiers);
 });
+
+test("walk skips dependency, VCS, build output, worktree and coverage directories", () => {
+  const root = mkdtempSync(join(tmpdir(), "qf-walk-"));
+  const skipped = ["node_modules", ".git", ".next", "dist", "build", ".worktrees", "coverage"];
+  for (const d of [...skipped, "app"]) {
+    mkdirSync(join(root, d, "sub"), { recursive: true });
+    writeFileSync(join(root, d, "sub", "q.sql"), "/* @name q */ SELECT 1;\n");
+  }
+  const found = walk(root, [".sql"]).map((f) => relative(root, f).replaceAll("\\", "/"));
+  assert.deepEqual(found, ["app/sub/q.sql"]);
+});

@@ -206,7 +206,10 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -e
-          for dir in npm-packages/queryfirst-win32-x64 npm-packages/queryfirst-linux-x64                      npm-packages/queryfirst-linux-arm64 npm-packages/queryfirst-darwin-x64                      npm-packages/queryfirst-darwin-arm64 npm-packages/queryfirst-runtime                      npm-packages/queryfirst; do
+          for dir in npm-packages/queryfirst-win32-x64 npm-packages/queryfirst-linux-x64 \
+                     npm-packages/queryfirst-linux-arm64 npm-packages/queryfirst-darwin-x64 \
+                     npm-packages/queryfirst-darwin-arm64 npm-packages/queryfirst-runtime \
+                     npm-packages/queryfirst; do
             name=$(node -p "require('./$dir/package.json').name")
             version=$(node -p "require('./$dir/package.json').version")
             if [ "$(npm view "$name@$version" version 2>/dev/null)" = "$version" ]; then
