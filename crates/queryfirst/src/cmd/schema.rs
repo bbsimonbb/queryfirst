@@ -15,14 +15,12 @@
 use std::path::Path;
 
 use qf_meta::{TypeCategory, TypeRef, fmt_type};
-use qf_pg::{
-    Catalog, ConnError, SchemaColumn, SchemaInfo, SchemaTable, connect_pool, resolve_connection,
-};
+use qf_pg::{Catalog, ConnError, SchemaColumn, SchemaInfo, SchemaTable, connect_pool};
 use serde_json::{Value, json};
 
-use crate::cmd::generate::{CONNECT_TIMEOUT, connection_diagnostic, connection_sources};
+use crate::cmd::generate::{CONNECT_TIMEOUT, connection_diagnostic, read_only_connection};
 use crate::config::{CONFIG_FILE, load_config};
-use crate::report::{Report, ReportedDiagnostic, print_report};
+use crate::report::{Report, ReportedDiagnostic, print_report, target_line};
 
 const NOT_ENFORCED: &str = "NOT NULL (not enforced everywhere)";
 
@@ -220,42 +218,67 @@ pub fn render(
     })
 }
 
-fn fatal(d: ReportedDiagnostic, json: bool) -> u8 {
+fn fatal(d: ReportedDiagnostic, target: Option<String>, json: bool) -> u8 {
     let mut report = Report::new("schema");
+    report.target = target;
     report.push(d);
     report.finish();
     print_report(&report, json);
     report.exit_code()
 }
 
-fn load(project: &Path, db: Option<&str>) -> Result<SchemaInfo, ReportedDiagnostic> {
-    let cfg = load_config(project).map_err(|d| ReportedDiagnostic::new(Some(CONFIG_FILE), &d))?;
-    let rt = tokio::runtime::Builder::new_current_thread()
+/// The schema, and the database it was read from (`host:port/db`) once a connection was
+/// resolved, also on failure.
+fn load(
+    project: &Path,
+    db: Option<&str>,
+) -> (Result<SchemaInfo, ReportedDiagnostic>, Option<String>) {
+    let cfg = match load_config(project) {
+        Ok(c) => c,
+        Err(d) => return (Err(ReportedDiagnostic::new(Some(CONFIG_FILE), &d)), None),
+    };
+    let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| ReportedDiagnostic::project("QF091", format!("cannot start: {e}"), None))?;
-    rt.block_on(async {
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            let d = ReportedDiagnostic::project("QF091", format!("cannot start: {e}"), None);
+            return (Err(d), None);
+        }
+    };
+    // Read-only sessions: schema may point at any database, production included.
+    let conn = match read_only_connection(&cfg, db) {
+        Ok(c) => c,
+        Err(e) => return (Err(connection_diagnostic(&e)), None),
+    };
+    let target = Some(conn.to_string());
+    let info = rt.block_on(async {
         let stop = |e: ConnError| connection_diagnostic(&e);
-        let conn = resolve_connection(&connection_sources(&cfg, db)).map_err(stop)?;
         let pool = connect_pool(&conn, 1, CONNECT_TIMEOUT)
             .await
             .map_err(stop)?;
         let cat = Catalog::load(&pool).await.map_err(stop)?;
         Ok(cat.schema_info())
-    })
+    });
+    (info, target)
 }
 
 /// Run `qf schema`, print the result and return the exit code.
 pub fn run(project: &Path, tables: &[String], db: Option<&str>, json: bool) -> u8 {
-    let info = match load(project, db) {
+    let (info, target) = load(project, db);
+    let info = match info {
         Ok(i) => i,
-        Err(d) => return fatal(d, json),
+        Err(d) => return fatal(d, target, json),
     };
     match render(&info, tables, json) {
         Ok(text) => {
             print!("{text}");
+            if !json {
+                eprint!("{}", target_line(target.as_deref()));
+            }
             0
         }
-        Err(d) => fatal(d, json),
+        Err(d) => fatal(d, target, json),
     }
 }

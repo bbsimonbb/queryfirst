@@ -6,15 +6,17 @@ use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
 use qf_meta::{QueryMeta, Transform, TypeRef, to_canonical_json};
-use qf_pg::{Catalog, ConnError, connect_pool, resolve_connection};
+use qf_pg::{Catalog, ConnError, connect_pool};
 use qf_sqlfile::Severity;
 use serde::Serialize;
 
-use crate::cmd::generate::{CONNECT_TIMEOUT, connection_diagnostic, connection_sources};
+use crate::cmd::generate::{CONNECT_TIMEOUT, connection_diagnostic, read_only_connection};
 use crate::config::{CONFIG_FILE, load_config};
 use crate::engine::{Analyzed, Describe, analyze_path, analyze_text};
 use crate::posix;
-use crate::report::{Report, ReportedDiagnostic, print_report, render_diagnostics, render_human};
+use crate::report::{
+    Report, ReportedDiagnostic, print_report, render_diagnostics, render_human, target_line,
+};
 
 /// The source name of a query given as text.
 const VIRTUAL_SOURCE: &str = "<sql>";
@@ -73,6 +75,8 @@ fn read_stdin() -> Option<String> {
 
 /// The shared pipeline for one query, given a describer and catalog. Only a connection error
 /// is an `Err`; query problems are in [`Analyzed::diagnostics`]. Nothing is written.
+///
+/// Query text has no file name for an `@name` to disagree with, so it gets no `QF003`.
 pub async fn describe_with<D: Describe>(
     project: &Path,
     input: &Input,
@@ -81,7 +85,7 @@ pub async fn describe_with<D: Describe>(
 ) -> Result<Analyzed, ConnError> {
     let mut a = match input {
         Input::Sql(text) => {
-            analyze_text(
+            let mut a = analyze_text(
                 VIRTUAL_SOURCE,
                 Path::new(VIRTUAL_NAME_PATH),
                 text,
@@ -89,7 +93,9 @@ pub async fn describe_with<D: Describe>(
                 cat,
                 None,
             )
-            .await?
+            .await?;
+            a.diagnostics.retain(|d| d.code != "QF003");
+            a
         }
         Input::File(path) => {
             let rel = path.strip_prefix(project).unwrap_or(path);
@@ -183,9 +189,10 @@ fn fatal(mut report: Report, d: ReportedDiagnostic) -> Report {
     report
 }
 
-/// What `describe` found: the analysed query, or a report of what stopped it.
+/// What `describe` found: the analysed query and the database it used (`host:port/db`), or a
+/// report of what stopped it.
 enum Outcome {
-    Described(Box<Analyzed>),
+    Described(Box<Analyzed>, String),
     Stopped(Report),
 }
 
@@ -211,13 +218,18 @@ fn describe_input(project: &Path, input: &Input, db: Option<&str>) -> Outcome {
         }
     };
     rt.block_on(async {
-        let stop = |e: ConnError| {
-            Outcome::Stopped(fatal(Report::new("describe"), connection_diagnostic(&e)))
+        let stop = |e: ConnError, target: Option<&str>| {
+            let mut r = Report::new("describe");
+            r.target = target.map(str::to_string);
+            Outcome::Stopped(fatal(r, connection_diagnostic(&e)))
         };
-        let conn = match resolve_connection(&connection_sources(&cfg, db)) {
+        // Read-only sessions: describe may point at any database, production included.
+        let conn = match read_only_connection(&cfg, db) {
             Ok(c) => c,
-            Err(e) => return stop(e),
+            Err(e) => return stop(e, None),
         };
+        let target = conn.to_string();
+        let stop = |e: ConnError| stop(e, Some(&target));
         let pool = match connect_pool(&conn, 1, CONNECT_TIMEOUT).await {
             Ok(p) => p,
             Err(e) => return stop(e),
@@ -227,7 +239,7 @@ fn describe_input(project: &Path, input: &Input, db: Option<&str>) -> Outcome {
             Err(e) => return stop(e),
         };
         match describe_with(project, input, &pool, &cat).await {
-            Ok(a) => Outcome::Described(Box::new(a)),
+            Ok(a) => Outcome::Described(Box::new(a), target.clone()),
             Err(e) => stop(e),
         }
     })
@@ -252,23 +264,25 @@ pub fn run(
             return report.exit_code();
         }
     };
-    let a = match describe_input(project, &input, db) {
-        Outcome::Described(a) => a,
+    let (a, target) = match describe_input(project, &input, db) {
+        Outcome::Described(a, target) => (a, target),
         Outcome::Stopped(report) => {
             print_report(&report, json);
             return report.exit_code();
         }
     };
-    let (stdout, stderr, code) = render_outcome(&a, json);
+    let (stdout, stderr, code) = render_outcome(&a, Some(&target), json);
     print!("{stdout}");
     eprint!("{stderr}");
     code
 }
 
-/// What to print for a described query: `(stdout, stderr, exit code)`.
-pub fn render_outcome(a: &Analyzed, json: bool) -> (String, String, u8) {
+/// What to print for a described query: `(stdout, stderr, exit code)`. `target` is the database
+/// it was described against (`host:port/db`), named on stderr in the human-readable output.
+pub fn render_outcome(a: &Analyzed, target: Option<&str>, json: bool) -> (String, String, u8) {
     let mut report = Report::new("describe");
     report.summary.queries = 1;
+    report.target = target.map(str::to_string);
     let file = posix(&a.source);
     for d in &a.diagnostics {
         report.push(ReportedDiagnostic::new(Some(&file), d));
@@ -278,16 +292,11 @@ pub fn render_outcome(a: &Analyzed, json: bool) -> (String, String, u8) {
     let (stdout, stderr) = if broken && !json {
         (String::new(), render_human(&report))
     } else if json {
-        (
-            format!(
-                "{}
-",
-                to_canonical_json(&a.meta)
-            ),
-            render_diagnostics(&report),
-        )
+        // The canonical JSON already ends with a newline.
+        (to_canonical_json(&a.meta), render_diagnostics(&report))
     } else {
-        (render_text(&a.meta), render_diagnostics(&report))
+        let stderr = render_diagnostics(&report) + &target_line(report.target.as_deref());
+        (render_text(&a.meta), stderr)
     };
     (stdout, stderr, report.exit_code())
 }

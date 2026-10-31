@@ -59,6 +59,9 @@ pub struct Report {
     pub written: Vec<String>,
     pub deleted: Vec<String>,
     pub summary: Summary,
+    /// The database the command used, as `host:port/db` (never a user or password), once a
+    /// connection was resolved. Shown in the human-readable output only.
+    pub target: Option<String>,
 }
 
 /// Codes that mean usage, configuration or connection trouble: exit 2.
@@ -72,6 +75,7 @@ impl Report {
             written: Vec::new(),
             deleted: Vec::new(),
             summary: Summary::default(),
+            target: None,
         }
     }
 
@@ -131,13 +135,14 @@ pub(crate) fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-/// `path:line:col: error[QFnnn]: message`, then `  hint: …`, then a summary line.
+/// `path:line:col: error[QFnnn]: message`, then `  hint: …`, then the [`target_line`] and a
+/// summary line.
 pub fn render_human(r: &Report) -> String {
     let mut out = render_diagnostics(r);
+    out.push_str(&target_line(r.target.as_deref()));
     let s = &r.summary;
     out.push_str(&format!(
-        "Queryfirst {}: {}, {}, {}; {} written, {} deleted
-",
+        "Queryfirst {}: {}, {}, {}; {} written, {} deleted\n",
         r.command,
         plural(s.queries, "query", "queries"),
         plural(s.errors, "error", "errors"),
@@ -146,6 +151,12 @@ pub fn render_human(r: &Report) -> String {
         s.deleted
     ));
     out
+}
+
+/// `database: host:port/db` and a newline, so a run against the wrong database is noticed; empty
+/// when no connection was resolved.
+pub fn target_line(target: Option<&str>) -> String {
+    target.map_or_else(String::new, |t| format!("database: {t}\n"))
 }
 
 /// Just the diagnostics of [`render_human`], without the summary line.

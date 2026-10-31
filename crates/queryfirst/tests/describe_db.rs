@@ -263,3 +263,86 @@ fn two_inputs_usage_error() {
     );
     assert_eq!(o.code, 2, "{}", o.stderr);
 }
+
+/// What the human summary must name for `url` (`host:port/db`), and its password, which it must
+/// never show.
+fn target_and_password(url: &str) -> (String, Option<String>) {
+    let c: tokio_postgres::Config = url.parse().expect("test URL parses");
+    let host = match &c.get_hosts()[0] {
+        tokio_postgres::config::Host::Tcp(h) => h.clone(),
+        #[allow(unreachable_patterns)]
+        other => format!("{other:?}"),
+    };
+    let port = c.get_ports().first().copied().unwrap_or(5432);
+    let db = c.get_dbname().map(str::to_string).unwrap_or_default();
+    let pw = c
+        .get_password()
+        .map(|p| String::from_utf8_lossy(p).into_owned());
+    (format!("{host}:{port}/{db}"), pw)
+}
+
+fn assert_names_target(url: &str, stderr: &str) {
+    let (target, pw) = target_and_password(url);
+    assert!(
+        stderr.contains(&format!("database: {target}")),
+        "no target line in: {stderr}"
+    );
+    if let Some(pw) = pw.filter(|p| !p.is_empty()) {
+        assert!(!stderr.contains(&pw), "password printed");
+    }
+    assert!(!stderr.contains("postgres://"), "connection string printed");
+}
+
+#[test]
+fn summary_names_the_database_without_password() {
+    let db = Db::new();
+    let dir = tempfile::tempdir().unwrap();
+    let o = run(
+        qf(dir.path(), &db.url).args(["describe", "--sql", "SELECT id FROM customers"]),
+        None,
+    );
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert_names_target(&db.url, &o.stderr);
+    assert!(!o.stdout.contains("database:"), "{}", o.stdout);
+}
+
+#[test]
+fn empty_sql_is_exit_1() {
+    let db = Db::new();
+    let dir = tempfile::tempdir().unwrap();
+    let o = run(
+        qf(dir.path(), &db.url).args(["describe", "--sql", "/* @name empty */"]),
+        None,
+    );
+    assert_eq!(o.code, 1, "{}", o.stderr);
+    assert!(
+        o.stderr
+            .contains("error[QF001]: no SQL statement in the file"),
+        "{}",
+        o.stderr
+    );
+    assert!(!o.stderr.contains("QF003"), "{}", o.stderr);
+}
+
+#[test]
+fn json_has_one_trailing_newline_and_no_qf003() {
+    let db = Db::new();
+    let dir = tempfile::tempdir().unwrap();
+    let o = run(
+        qf(dir.path(), &db.url).args([
+            "describe",
+            "--json",
+            "--sql",
+            "/* @name getIds */ SELECT id FROM customers",
+        ]),
+        None,
+    );
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert!(
+        o.stdout.ends_with("}\n") && !o.stdout.ends_with("\n\n"),
+        "{:?}",
+        o.stdout
+    );
+    assert_eq!(from_json(&o.stdout).unwrap().name, "getIds");
+    assert!(!o.stderr.contains("QF003"), "{}", o.stderr);
+}

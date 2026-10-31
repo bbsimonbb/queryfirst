@@ -34,7 +34,7 @@ use crate::config::{CONFIG_FILE, TestConfig, load_config};
 use crate::discover::discover_metas;
 use crate::engine::{Describe, assemble, connection_lost, query_file_from_meta};
 use crate::posix;
-use crate::report::{Report, ReportedDiagnostic, plural, render_diagnostics, to_json};
+use crate::report::{Report, ReportedDiagnostic, plural, render_diagnostics, target_line, to_json};
 
 const REGENERATE: &str = "run `qf generate` and commit the result";
 
@@ -97,6 +97,7 @@ impl TestReport {
     pub fn render_human(&self) -> String {
         let r = &self.report;
         let mut out = render_diagnostics(r);
+        out.push_str(&target_line(r.target.as_deref()));
         out.push_str(&format!(
             "Queryfirst test: {}, {} with differences; {}, {}, {}{}\n",
             plural(r.summary.queries, "query", "queries"),
@@ -526,6 +527,12 @@ pub fn test_report(
             Ok(c) => c,
             Err(e) => return stop(e),
         };
+        let target = Some(conn.to_string());
+        let stop = |e: ConnError| {
+            let mut r = stop(e);
+            r.report.target = target.clone();
+            r
+        };
         let size = cfg.pool.min(entries.len()).max(1);
         let pool = match connect_pool(&conn, size, CONNECT_TIMEOUT).await {
             Ok(p) => p,
@@ -535,7 +542,9 @@ pub fn test_report(
             Ok(c) => c,
             Err(e) => return stop(e),
         };
-        test_with(&entries, &pool, &cat, cat.timezone(), &opts).await
+        let mut r = test_with(&entries, &pool, &cat, cat.timezone(), &opts).await;
+        r.report.target = target;
+        r
     })
 }
 

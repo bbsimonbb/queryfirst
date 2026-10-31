@@ -573,3 +573,45 @@ fn single_file_scope_fast() {
     assert!(!root.join("app/q0.qf.json").exists());
     assert!(took < Duration::from_secs(2), "took {took:?}");
 }
+
+/// What the human summary must name for `url` (`host:port/db`), and its password, which it must
+/// never show.
+fn target_and_password(url: &str) -> (String, Option<String>) {
+    let c: tokio_postgres::Config = url.parse().expect("test URL parses");
+    let host = match &c.get_hosts()[0] {
+        tokio_postgres::config::Host::Tcp(h) => h.clone(),
+        #[allow(unreachable_patterns)]
+        other => format!("{other:?}"),
+    };
+    let port = c.get_ports().first().copied().unwrap_or(5432);
+    let db = c.get_dbname().map(str::to_string).unwrap_or_default();
+    let pw = c
+        .get_password()
+        .map(|p| String::from_utf8_lossy(p).into_owned());
+    (format!("{host}:{port}/{db}"), pw)
+}
+
+fn assert_names_target(url: &str, stderr: &str) {
+    let (target, pw) = target_and_password(url);
+    assert!(
+        stderr.contains(&format!("database: {target}")),
+        "no target line in: {stderr}"
+    );
+    if let Some(pw) = pw.filter(|p| !p.is_empty()) {
+        assert!(!stderr.contains(&pw), "password printed");
+    }
+    assert!(!stderr.contains("postgres://"), "connection string printed");
+}
+
+#[test]
+fn summary_names_the_database_without_password() {
+    let db = Db::new();
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "a.psql", CUSTOMER);
+    let out = generate(dir.path(), &db.url, &[]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_names_target(&db.url, &out.stderr);
+    // Not in the JSON output.
+    let out = generate(dir.path(), &db.url, &["--json"]);
+    assert!(!out.stdout.contains("database:"), "{}", out.stdout);
+}

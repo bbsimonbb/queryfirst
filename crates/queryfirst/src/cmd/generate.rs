@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use qf_pg::{
-    Catalog, ConnError, ConnSource, Described, PgQueryError, connect_pool, resolve_connection,
+    Catalog, ConnError, ConnSource, Described, PgQueryError, ResolvedConn, connect_pool,
+    resolve_connection,
 };
 
 use crate::config::{CONFIG_FILE, Config, load_config};
@@ -41,6 +42,13 @@ pub fn connection_sources(cfg: &Config, db: Option<&str>) -> Vec<ConnSource> {
         None => sources.push(ConnSource::StandardEnv),
     }
     sources
+}
+
+/// The connection for commands that only read and may point at any database, production
+/// included (`qf describe`, `qf schema`): [`connection_sources`], with every session read-only
+/// (`default_transaction_read_only=on`), as for `qf test`.
+pub fn read_only_connection(cfg: &Config, db: Option<&str>) -> Result<ResolvedConn, ConnError> {
+    resolve_connection(&connection_sources(cfg, db)).map(ResolvedConn::read_only)
 }
 
 /// Used when there is nothing to describe, so no connection is opened.
@@ -140,6 +148,7 @@ pub fn generate_report(project: &Path, paths: &[PathBuf], db: Option<&str>) -> R
             Ok(c) => c,
             Err(e) => return fatal(report, connection_diagnostic(&e)),
         };
+        report.target = Some(conn.to_string());
         let size = cfg.pool.min(files.len()).max(1);
         let pool = match connect_pool(&conn, size, CONNECT_TIMEOUT).await {
             Ok(p) => p,
@@ -149,7 +158,9 @@ pub fn generate_report(project: &Path, paths: &[PathBuf], db: Option<&str>) -> R
             Ok(c) => c,
             Err(e) => return fatal(report, connection_diagnostic(&e)),
         };
-        generate_with(project, &cfg, &files, whole_project, &pool, &cat).await
+        let mut done = generate_with(project, &cfg, &files, whole_project, &pool, &cat).await;
+        done.target = report.target;
+        done
     })
 }
 

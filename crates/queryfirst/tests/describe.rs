@@ -262,14 +262,83 @@ fn notes_go_to_stderr_not_stdout() {
         col: 1,
     });
     for json in [false, true] {
-        let (out, err, code) = render_outcome(&a, json);
+        let (out, err, code) = render_outcome(&a, None, json);
         assert_eq!(code, 0);
         assert!(!out.contains("QF020"), "{out}");
         assert!(err.contains("note[QF020]"), "{err}");
     }
-    let (out, _, _) = render_outcome(&a, false);
-    assert!(out.starts_with(
-        "adhoc
-"
-    ));
+    let (out, _, _) = render_outcome(&a, None, false);
+    assert!(out.starts_with("adhoc\n"));
+}
+
+#[test]
+fn json_ends_with_a_single_newline() {
+    let a = describe_sql("SELECT id FROM t");
+    let (out, _, _) = render_outcome(&a, Some("h:5432/db"), true);
+    assert!(out.ends_with("}\n") && !out.ends_with("\n\n"), "{out:?}");
+    assert_eq!(from_json(&out).unwrap(), a.meta);
+}
+
+#[test]
+fn human_output_names_the_database() {
+    let target = Some("db.example:5432/app");
+    let ok = describe_sql("SELECT id FROM t");
+    let (out, err, _) = render_outcome(&ok, target, false);
+    assert!(err.contains("database: db.example:5432/app\n"), "{err}");
+    assert!(!out.contains("database:"), "{out}");
+    let broken = describe_sql("SELECT id\nFORM t");
+    let (_, err, code) = render_outcome(&broken, target, false);
+    assert_eq!(code, 1);
+    assert!(err.contains("database: db.example:5432/app\n"), "{err}");
+    // Not in the JSON output, nor its stderr.
+    let (out, err, _) = render_outcome(&ok, target, true);
+    assert!(!out.contains("database:") && !err.contains("database:"));
+}
+
+#[test]
+fn sql_input_with_name_header_has_no_qf003() {
+    // `adhoc` is a virtual name: an `@name` cannot disagree with it.
+    let a = describe_sql("/* @name getThing */\nSELECT id FROM t");
+    assert_eq!(a.meta.name, "getThing");
+    assert!(
+        !a.diagnostics.iter().any(|d| d.code == "QF003"),
+        "{:?}",
+        a.diagnostics
+    );
+    // A real file still gets it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("other-name.sql");
+    std::fs::write(&path, "/* @name getThing */\nSELECT id FROM t\n").unwrap();
+    let a = run(describe_with(
+        dir.path(),
+        &Input::File(path),
+        &Fake,
+        &Catalog::default(),
+    ))
+    .unwrap();
+    assert!(a.diagnostics.iter().any(|d| d.code == "QF003"));
+}
+
+#[test]
+fn empty_sql_is_a_qf001_query_error() {
+    let a = describe_sql("/* @name empty */");
+    assert!(matches!(a.meta.status, Status::Broken { .. }));
+    let d = a.diagnostics.iter().find(|d| d.code == "QF001").unwrap();
+    assert_eq!(d.message, "no SQL statement in the file");
+    let (out, err, code) = render_outcome(&a, None, false);
+    assert_eq!(code, 1);
+    assert!(out.is_empty());
+    assert!(
+        err.contains("error[QF001]: no SQL statement in the file"),
+        "{err}"
+    );
+}
+
+#[test]
+fn describe_and_schema_sessions_are_read_only() {
+    use queryfirst::cmd::generate::read_only_connection;
+    use queryfirst::config::Config;
+    let c = read_only_connection(&Config::default(), Some("postgres://u:pw@h:5432/db")).unwrap();
+    assert_eq!(c.options(), Some(qf_pg::READ_ONLY_OPTION));
+    assert_eq!(c.to_string(), "h:5432/db");
 }

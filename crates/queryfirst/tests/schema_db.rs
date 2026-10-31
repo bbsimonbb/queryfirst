@@ -246,3 +246,48 @@ fn unreachable_database_is_qf090() {
     assert_eq!(o.code, 2, "{}", o.stderr);
     assert!(o.stderr.contains("error[QF090]"), "{}", o.stderr);
 }
+
+/// What the human summary must name for `url` (`host:port/db`), and its password, which it must
+/// never show.
+fn target_and_password(url: &str) -> (String, Option<String>) {
+    let c: tokio_postgres::Config = url.parse().expect("test URL parses");
+    let host = match &c.get_hosts()[0] {
+        tokio_postgres::config::Host::Tcp(h) => h.clone(),
+        #[allow(unreachable_patterns)]
+        other => format!("{other:?}"),
+    };
+    let port = c.get_ports().first().copied().unwrap_or(5432);
+    let db = c.get_dbname().map(str::to_string).unwrap_or_default();
+    let pw = c
+        .get_password()
+        .map(|p| String::from_utf8_lossy(p).into_owned());
+    (format!("{host}:{port}/{db}"), pw)
+}
+
+fn assert_names_target(url: &str, stderr: &str) {
+    let (target, pw) = target_and_password(url);
+    assert!(
+        stderr.contains(&format!("database: {target}")),
+        "no target line in: {stderr}"
+    );
+    if let Some(pw) = pw.filter(|p| !p.is_empty()) {
+        assert!(!stderr.contains(&pw), "password printed");
+    }
+    assert!(!stderr.contains("postgres://"), "connection string printed");
+}
+
+#[test]
+fn names_the_database_on_stderr_without_password() {
+    let db = Db::new();
+    let dir = tempfile::tempdir().unwrap();
+    let o = run(qf(dir.path(), &db.url).arg("schema"), None);
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert_names_target(&db.url, &o.stderr);
+    assert!(!o.stdout.contains("database:"), "{}", o.stdout);
+    let o = run(qf(dir.path(), &db.url).args(["schema", "--json"]), None);
+    assert!(
+        o.stderr.is_empty() && !o.stdout.contains("database:"),
+        "{}",
+        o.stderr
+    );
+}
