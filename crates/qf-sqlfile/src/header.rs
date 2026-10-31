@@ -44,12 +44,28 @@ pub fn parse_query_file(path: &Path, normalised: &str) -> Result<QueryFile, Vec<
         diags: Vec::new(),
     };
 
-    let start = src.len() - src.trim_start().len();
+    let skip_ws = |at: usize| at + (src[at..].len() - src[at..].trim_start().len());
     let mut header: Option<(usize, usize)> = None; // inner range of the comment
     let mut body_start = 0;
-    if src[start..].starts_with("/*")
-        && let Some(end) = src[start + 2..].find("*/")
-    {
+    // The header is the first leading comment carrying a tag. Plain comments before it
+    // (pgtyped accepts them) join the description; without a header they stay in the body.
+    let mut preamble: Vec<&str> = Vec::new();
+    let mut start = skip_ws(0);
+    let mut unterminated = None;
+    loop {
+        if src[start..].starts_with("--") {
+            let end = src[start..].find('\n').map_or(src.len(), |e| start + e);
+            preamble.push(src[start + 2..end].trim());
+            start = skip_ws(end);
+            continue;
+        }
+        if !src[start..].starts_with("/*") {
+            break;
+        }
+        let Some(end) = src[start + 2..].find("*/") else {
+            unterminated = Some(start);
+            break;
+        };
         let inner = (start + 2, start + 2 + end);
         let has_tag = src[inner.0..inner.1]
             .lines()
@@ -57,8 +73,15 @@ pub fn parse_query_file(path: &Path, normalised: &str) -> Result<QueryFile, Vec<
         if has_tag {
             header = Some(inner);
             body_start = inner.1 + 2;
+            break;
         }
-    } else if src[start..].starts_with("/*")
+        preamble.extend(src[inner.0..inner.1].split('\n').map(|l| strip_line(l).0));
+        start = skip_ws(inner.1 + 2);
+    }
+    if header.is_none() {
+        preamble.clear();
+    }
+    if let Some(start) = unterminated
         && src[start..].lines().any(|l| {
             TAGS.iter()
                 .any(|t| strip_line(l.trim_start_matches("/*")).0.starts_with(t))
@@ -77,7 +100,7 @@ pub fn parse_query_file(path: &Path, normalised: &str) -> Result<QueryFile, Vec<
     let mut returns = None;
     let mut expansions = Vec::new();
     let mut type_overrides = Vec::new();
-    let mut desc: Vec<&str> = Vec::new();
+    let mut desc: Vec<&str> = preamble;
 
     if let Some((a, b)) = header {
         let mut off = a;

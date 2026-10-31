@@ -137,6 +137,30 @@ fn no_header_when_plain_comment() {
     assert_eq!(q.body, "/* just a comment */\nSELECT 1");
 }
 
+/// pgtyped accepts plain comments before the `@name` comment (simplyfirst's
+/// get-related-documents.psql had one, which the split put on top of get-quotes.psql).
+#[test]
+fn plain_comments_before_header() {
+    let q = ok(
+        "get-quotes.psql",
+        "/* What this file is for,\n   mentioning :notAParam. */\n\n-- and a line comment\n/* @name getQuotes */\n\nSELECT :id!;\n",
+    );
+    assert_eq!(q.name, "getQuotes");
+    assert!(q.name_from_annotation);
+    assert_eq!(q.body, "SELECT :id!");
+    assert_eq!(
+        q.description.as_deref(),
+        Some("What this file is for,\nmentioning :notAParam.\nand a line comment")
+    );
+    // Still one query per file.
+    let e = parse(
+        "x.sql",
+        "/* intro */\n/* @name a */\nSELECT 1;\n/* @name b */\nSELECT 2;",
+    )
+    .unwrap_err();
+    assert_eq!(e[0].code, "QF002");
+}
+
 #[test]
 fn crlf_equivalent() {
     let lf = "/* @name q\n @param ids -> (...)\n*/\nSELECT 1;\n";
