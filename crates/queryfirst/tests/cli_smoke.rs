@@ -12,16 +12,6 @@ fn version_prints() {
 }
 
 #[test]
-fn init_is_not_implemented() {
-    Command::cargo_bin("qf")
-        .unwrap()
-        .arg("init")
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("not implemented"));
-}
-
-#[test]
 fn generate_empty_project_needs_no_database() {
     let dir = tempfile::tempdir().unwrap();
     Command::cargo_bin("qf")

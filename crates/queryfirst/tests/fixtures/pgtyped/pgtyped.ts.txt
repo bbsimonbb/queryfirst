@@ -1,0 +1,28 @@
+import { IConfig } from "@pgtyped/cli"
+
+const config: IConfig = {
+  transforms: [
+    {
+      mode: "sql",
+      include: "**/*.*sql",
+      emitTemplate: "{{dir}}/{{name}}.queries.ts",
+    },
+  ],
+  typesOverrides: {
+    numeric: "number",
+  },
+  srcDir: "./app/",
+  failOnError: false,
+  camelCaseColumnNames: false,
+  maxWorkerThreads: 1,
+  db: {
+    ssl: false,
+    host: process.env.PGHOST,
+    port: parseInt(process.env.PGPORT || "5432"),
+    database: process.env.PGDATABASE,
+    user: process.env.PGUSER,
+    password: process.env.PGPASSWORD,
+  },
+}
+
+export default config

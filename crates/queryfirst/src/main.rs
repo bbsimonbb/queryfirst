@@ -79,8 +79,12 @@ enum Command {
         #[arg(long, value_name = "CONN")]
         db: Option<String>,
     },
-    /// Initialise a Queryfirst project.
-    Init,
+    /// Write a default queryfirst.json (never overwrites an existing one).
+    Init {
+        /// Convert pgtyped-config.json (or .pgtyped.ts) in the project directory.
+        #[arg(long)]
+        from_pgtyped: bool,
+    },
 }
 
 /// Nearest ancestor of `start` (inclusive) containing `queryfirst.json`, else `start`.
@@ -114,7 +118,7 @@ fn main() -> ExitCode {
             }
         },
     };
-    let name = match cli.command {
+    match cli.command {
         Command::Generate { paths, db } => {
             // Literal paths, relative to the current directory.
             let paths: Vec<PathBuf> = paths
@@ -124,22 +128,25 @@ fn main() -> ExitCode {
                     _ => p,
                 })
                 .collect();
-            let code = queryfirst::cmd::generate::run(&project, &paths, db.as_deref(), cli.json);
-            return ExitCode::from(code);
+            ExitCode::from(queryfirst::cmd::generate::run(
+                &project,
+                &paths,
+                db.as_deref(),
+                cli.json,
+            ))
         }
         Command::Describe { file, sql, db } => {
             let file = file.map(|p| match &cwd {
                 Ok(cwd) if p.is_relative() => cwd.join(p),
                 _ => p,
             });
-            let code = queryfirst::cmd::describe::run(
+            ExitCode::from(queryfirst::cmd::describe::run(
                 &project,
                 file.as_deref(),
                 sql.as_deref(),
                 db.as_deref(),
                 cli.json,
-            );
-            return ExitCode::from(code);
+            ))
         }
         Command::Check { paths } => {
             let paths: Vec<PathBuf> = paths
@@ -149,8 +156,7 @@ fn main() -> ExitCode {
                     _ => p,
                 })
                 .collect();
-            let code = queryfirst::cmd::check::run(&project, &paths, cli.json);
-            return ExitCode::from(code);
+            ExitCode::from(queryfirst::cmd::check::run(&project, &paths, cli.json))
         }
         Command::Test {
             paths,
@@ -178,19 +184,30 @@ fn main() -> ExitCode {
                     queryfirst::cmd::test::run(&project, source, db.as_deref(), strict, cli.json)
                 }
             };
-            return ExitCode::from(code);
+            ExitCode::from(code)
         }
         Command::Bundle { output } => {
             let output = output.map(|p| absolute(&cwd, p));
-            let code = queryfirst::cmd::bundle::run(&project, output.as_deref(), cli.json);
-            return ExitCode::from(code);
+            ExitCode::from(queryfirst::cmd::bundle::run(
+                &project,
+                output.as_deref(),
+                cli.json,
+            ))
         }
-        Command::Schema { tables, db } => {
-            let code = queryfirst::cmd::schema::run(&project, &tables, db.as_deref(), cli.json);
-            return ExitCode::from(code);
+        Command::Schema { tables, db } => ExitCode::from(queryfirst::cmd::schema::run(
+            &project,
+            &tables,
+            db.as_deref(),
+            cli.json,
+        )),
+        Command::Init { from_pgtyped } => {
+            // Never an ancestor's queryfirst.json: init writes where the user is.
+            let dir = match (&explicit_project, &cwd) {
+                (Some(p), _) => absolute(&cwd, p.clone()),
+                (None, Ok(cwd)) => cwd.clone(),
+                (None, Err(_)) => project.clone(),
+            };
+            ExitCode::from(queryfirst::cmd::init::run(&dir, from_pgtyped, cli.json))
         }
-        Command::Init => "init",
-    };
-    eprintln!("qf {name}: not implemented");
-    ExitCode::from(2)
+    }
 }

@@ -1,0 +1,19 @@
+{
+  "transforms": [
+    {
+      "mode": "sql",
+      "include": "**/*.*sql",
+      "emitTemplate": "{{dir}}/{{name}}.queries.ts"
+    }
+  ],
+  "typesOverrides": {
+    "numeric": "number"
+  },
+  "srcDir": "./app/",
+  "failOnError": false,
+  "camelCaseColumnNames": false,
+  "maxWorkerThreads": 1,
+  "db": {
+    "ssl": true
+  }
+}
