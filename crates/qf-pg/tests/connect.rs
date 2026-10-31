@@ -1,100 +1,110 @@
-//! Connection resolution and connect failures. No database needed.
+//! Connection resolution and connect failures. No database needed. No test reads or writes the
+//! process environment: resolution goes through an injected one.
 
-use qf_pg::{ConnSource, connect_pool, resolve_connection};
+use qf_pg::{ConnError, ConnSource, ResolvedConn, connect_pool, resolve_connection_with};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
+
+/// An environment of exactly `pairs` (no home directory, so no password or service file).
+fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
+    let map: HashMap<String, String> = pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    move |k: &str| map.get(k).cloned()
+}
+
+/// Resolution against an empty environment.
+fn resolve_connection(sources: &[ConnSource]) -> Result<ResolvedConn, ConnError> {
+    resolve_connection_with(sources, &env_of(&[]))
+}
 
 #[test]
 fn explicit_wins() {
-    // SAFETY: the variable name is unique to this test.
-    unsafe {
-        std::env::set_var(
-            "QF_TEST_CONN_EXPLICIT_WINS",
-            "postgres://u@other:5432/otherdb",
-        )
-    };
-    let c = resolve_connection(&[
-        ConnSource::Explicit("postgres://u@h1:5433/db1".into()),
-        ConnSource::Env("QF_TEST_CONN_EXPLICIT_WINS".into()),
-    ])
+    let env = env_of(&[(
+        "QF_TEST_CONN_EXPLICIT_WINS",
+        "postgres://u@other:5432/otherdb",
+    )]);
+    let c = resolve_connection_with(
+        &[
+            ConnSource::Explicit("postgres://u@h1:5433/db1".into()),
+            ConnSource::Env("QF_TEST_CONN_EXPLICIT_WINS".into()),
+        ],
+        &env,
+    )
     .unwrap();
     assert_eq!(c.display_target, "h1:5433/db1");
 }
 
 #[test]
 fn env_var_named() {
-    // SAFETY: the variable names are unique to this test.
-    unsafe { std::env::set_var("QF_TEST_CONN_ENV_NAMED", "postgres://u@h2:5434/db2") };
-    unsafe { std::env::remove_var("QF_TEST_CONN_ENV_NAMED_UNSET") };
-    let c = resolve_connection(&[
-        ConnSource::Env("QF_TEST_CONN_ENV_NAMED_UNSET".into()),
-        ConnSource::Env("QF_TEST_CONN_ENV_NAMED".into()),
-        ConnSource::Explicit("postgres://u@never:5432/never".into()),
-    ])
+    let env = env_of(&[("QF_TEST_CONN_ENV_NAMED", "postgres://u@h2:5434/db2")]);
+    let c = resolve_connection_with(
+        &[
+            ConnSource::Env("QF_TEST_CONN_ENV_NAMED_UNSET".into()),
+            ConnSource::Env("QF_TEST_CONN_ENV_NAMED".into()),
+            ConnSource::Explicit("postgres://u@never:5432/never".into()),
+        ],
+        &env,
+    )
     .unwrap();
     assert_eq!(c.display_target, "h2:5434/db2");
 }
 
 #[test]
 fn standard_env_database_url_then_pg_vars() {
-    // This is the only test that touches DATABASE_URL and the PG* variables.
     let pg = [
-        "PGHOST",
-        "PGPORT",
-        "PGUSER",
-        "PGDATABASE",
-        "PGPASSWORD",
-        "PGSSLMODE",
+        ("DATABASE_URL", "postgres://u@h3:5435/db3"),
+        ("PGHOST", "pghost"),
+        ("PGPORT", "6543"),
+        ("PGUSER", "pguser"),
+        ("PGDATABASE", "pgdb"),
+        ("PGPASSWORD", "pgsecret"),
     ];
-    // SAFETY: no other test reads or writes these variables.
-    unsafe {
-        for v in pg {
-            std::env::remove_var(v);
-        }
-        std::env::set_var("DATABASE_URL", "postgres://u@h3:5435/db3");
-        std::env::set_var("PGHOST", "pghost");
-        std::env::set_var("PGPORT", "6543");
-        std::env::set_var("PGUSER", "pguser");
-        std::env::set_var("PGDATABASE", "pgdb");
-        std::env::set_var("PGPASSWORD", "pgsecret");
-    }
-    let c = resolve_connection(&[ConnSource::StandardEnv]).unwrap();
+    let std_env = [ConnSource::StandardEnv];
+    let with = |extra: &[(&'static str, &'static str)]| {
+        let mut all = pg.to_vec();
+        all.extend_from_slice(extra);
+        env_of(&all)
+    };
+    let c = resolve_connection_with(&std_env, &with(&[])).unwrap();
     assert_eq!(c.display_target, "h3:5435/db3");
     assert_eq!(c.ssl_mode().as_str(), "prefer");
 
     // PGSSLMODE applies when the connection string has no sslmode of its own.
-    unsafe { std::env::set_var("PGSSLMODE", "require") };
-    let c = resolve_connection(&[ConnSource::StandardEnv]).unwrap();
+    let env = with(&[("PGSSLMODE", "require")]);
+    let c = resolve_connection_with(&std_env, &env).unwrap();
     assert_eq!(c.ssl_mode().as_str(), "require");
-    let c = resolve_connection(&[ConnSource::Explicit(
-        "postgres://u@h:5432/db?sslmode=disable".into(),
-    )])
+    let c = resolve_connection_with(
+        &[ConnSource::Explicit(
+            "postgres://u@h:5432/db?sslmode=disable".into(),
+        )],
+        &env,
+    )
     .unwrap();
     assert_eq!(c.ssl_mode().as_str(), "disable");
-    unsafe { std::env::remove_var("PGSSLMODE") };
 
     // PGSSLROOTCERT applies when the connection string has no sslrootcert of its own.
-    unsafe { std::env::set_var("PGSSLROOTCERT", "/env/root.crt") };
-    let c = resolve_connection(&[ConnSource::StandardEnv]).unwrap();
+    let env = with(&[("PGSSLROOTCERT", "/env/root.crt")]);
+    let c = resolve_connection_with(&std_env, &env).unwrap();
     assert_eq!(c.root_cert(), Some("/env/root.crt"));
-    let c = resolve_connection(&[ConnSource::Explicit(
-        "postgres://u@h:5432/db?sslrootcert=/url/root.crt".into(),
-    )])
+    let c = resolve_connection_with(
+        &[ConnSource::Explicit(
+            "postgres://u@h:5432/db?sslrootcert=/url/root.crt".into(),
+        )],
+        &env,
+    )
     .unwrap();
     assert_eq!(c.root_cert(), Some("/url/root.crt"));
-    unsafe { std::env::remove_var("PGSSLROOTCERT") };
 
-    unsafe { std::env::remove_var("DATABASE_URL") };
-    let c = resolve_connection(&[ConnSource::StandardEnv]).unwrap();
+    // Without DATABASE_URL, the PG* variables.
+    let env = env_of(&pg[1..]);
+    let c = resolve_connection_with(&std_env, &env).unwrap();
     assert_eq!(c.display_target, "pghost:6543/pgdb");
     assert!(!format!("{c:?}").contains("pgsecret"));
     assert!(!c.to_string().contains("pgsecret"));
 
     // Nothing configured: StandardEnv yields nothing, so the next source wins.
-    unsafe {
-        for v in pg {
-            std::env::remove_var(v);
-        }
-    }
     let c = resolve_connection(&[
         ConnSource::StandardEnv,
         ConnSource::Explicit("postgres://u@h4:5436/db4".into()),

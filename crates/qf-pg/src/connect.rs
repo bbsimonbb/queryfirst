@@ -494,9 +494,11 @@ fn parse_params(s: &str, origin: &str) -> Result<Params, ConnError> {
 fn parse_url(rest: &str) -> Option<Params> {
     let mut p = Params::default();
     let mut rest = rest;
-    // As libpq: the user info runs up to an `@` met before any `/`.
+    // The user info runs up to an `@` met before any `/` (as libpq) or `?` (so an `@` in a query
+    // value can never hide an option). Not `#`: libpq URLs have no fragment, and a raw `#` is
+    // common in passwords.
     if let Some(i) = rest
-        .find(['@', '/'])
+        .find(['@', '/', '?'])
         .filter(|&i| rest.as_bytes()[i] == b'@')
     {
         let userinfo = &rest[..i];
@@ -548,6 +550,10 @@ fn parse_url(rest: &str) -> Option<Params> {
         for pair in query.split('&').filter(|pair| !pair.is_empty()) {
             let (k, v) = pair.split_once('=')?;
             let (k, v) = (percent_decode(k), percent_decode(v));
+            // Only a keyword goes on to the key=value string; anything else is malformed.
+            if k.is_empty() || !k.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') {
+                return None;
+            }
             // libpq's URL-only spelling of `sslmode=require`.
             if k == "ssl" && v == "true" {
                 p.set("sslmode", "require".into());
@@ -631,7 +637,7 @@ const SUPPORTED_KEYS: [&str; 22] = [
 
 /// libpq options Queryfirst does not support. In a service file these are named in the error;
 /// any other unknown keyword is reported by line only, since it may be a mistyped secret.
-const UNSUPPORTED_LIBPQ_KEYS: [&str; 30] = [
+const UNSUPPORTED_LIBPQ_KEYS: [&str; 32] = [
     "sslcert",
     "sslkey",
     "sslpassword",
@@ -661,6 +667,8 @@ const UNSUPPORTED_LIBPQ_KEYS: [&str; 30] = [
     "oauth_client_secret",
     "oauth_scope",
     "authtype",
+    "servicefile",
+    "sslkeylogfile",
     "tty",
 ];
 
@@ -713,6 +721,23 @@ fn apply_service(p: &mut Params, name: &str, env: Env) -> Result<(), ConnError> 
             }
             return Err(syntax_error(&svc.file, e.line)
                 .with_detail(format!("not a connection option, in service `{name}`")));
+        }
+        // Checked here so the error names the file and line, never the value.
+        let v = e.value.as_str();
+        let valid = match e.key.as_str() {
+            "sslmode" => SslMode::parse(v).is_some(),
+            "port" => v
+                .split(',')
+                .all(|x| x.trim().is_empty() || x.trim().parse::<u16>().is_ok()),
+            "connect_timeout" => v.parse::<i64>().is_ok(),
+            _ => true,
+        };
+        if !valid {
+            return Err(ConnError::config(format!(
+                "invalid value for `{}` in {}",
+                e.key,
+                at(e.line)
+            )));
         }
         // The first value in the section wins, as in libpq.
         if !p.has(&e.key) {

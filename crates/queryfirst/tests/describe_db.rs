@@ -99,6 +99,12 @@ fn qf(project: &Path, url: &str) -> Command {
         "PGUSER",
         "PGDATABASE",
         "PGPASSWORD",
+        "PGSERVICE",
+        "PGSERVICEFILE",
+        "PGSYSCONFDIR",
+        "PGPASSFILE",
+        "PGCONNECT_TIMEOUT",
+        "PGAPPNAME",
         "PGSSLMODE",
     ] {
         c.env_remove(v);

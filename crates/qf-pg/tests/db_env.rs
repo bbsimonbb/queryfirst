@@ -102,8 +102,27 @@ async fn passwordless_url_connects_with_pgpass_file() {
     let (url, pw) = url_and_password();
     let home = tempfile::tempdir().unwrap();
     let file = home.path().join("pgpass");
-    let escaped = pw.replace('\\', "\\\\").replace(':', "\\:");
-    std::fs::write(&file, format!("other:1:x:y:wrong\n*:*:*:*:{escaped}\n")).unwrap();
+    // The exact line for the resolved target, between lines that must not match: the wildcard
+    // line after it has a wrong password, so connecting proves the match end to end.
+    let target = resolve_connection_with(&[ConnSource::Explicit(url.clone())], &|_| None)
+        .unwrap()
+        .display_target;
+    let (host_port, db) = target.split_once('/').unwrap();
+    let (host, port) = host_port.rsplit_once(':').unwrap();
+    let user = url.split_once("://").unwrap().1.split_once('@').unwrap().0;
+    let esc = |s: &str| s.replace('\\', "\\\\").replace(':', "\\:");
+    let line = format!(
+        "{}:{port}:{}:{}:{}",
+        esc(host),
+        esc(db),
+        esc(user),
+        esc(&pw)
+    );
+    std::fs::write(
+        &file,
+        format!("other:1:x:y:wrong\n{line}\n*:*:*:*:wrong-wildcard\n"),
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

@@ -94,9 +94,12 @@ command whose standard output is the connection string). The string may be a URL
    string leaves out from its `[section]` of the first service file that has one: the file named
    by `PGSERVICEFILE`, else `~/.pg_service.conf` (Windows: `%APPDATA%\postgresql\.pg_service.conf`);
    then `PGSYSCONFDIR/pg_service.conf`. An unknown service is an error naming the files searched.
+   An empty `service=` in the string means no service, even if a stray `PGSERVICE` is set.
 3. The environment fills what is still missing: `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`,
    `PGPASSWORD`, `PGSSLMODE`, `PGSSLROOTCERT`, `PGCONNECT_TIMEOUT`, `PGAPPNAME`, `PGPASSFILE`.
-   (As in libpq, a service value beats the environment variable for the same setting.)
+   (As in libpq, a service value beats the environment variable for the same setting.) So a URL
+   host without a port takes the service's port, else `PGPORT`, else 5432; earlier versions of
+   Queryfirst always used 5432 there.
 4. Defaults: host `localhost`, port `5432`, user `PGUSER` / your login name, database = user.
 5. Still no password: the password file — `passfile=` in the string, else `PGPASSFILE`, else
    `~/.pgpass` (Windows: `%APPDATA%\postgresql\pgpass.conf`). Lines are
@@ -106,6 +109,8 @@ command whose standard output is the connection string). The string may be a URL
    a warning, if the group or others can read it (`chmod 0600 ~/.pgpass`), as libpq does.
 
 So the password precedence is: in the string > in the service > `PGPASSWORD` > the password file.
+`PGPASSWORD` is not matched against anything: one left set for another server wins over the right
+`.pgpass` line, so unset it when you rely on `.pgpass`.
 
 Example: a password-less URL in the project's variable, the password in `.pgpass`.
 

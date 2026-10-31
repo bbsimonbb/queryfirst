@@ -64,6 +64,12 @@ fn generate_without_connection_exits_2() {
         "PGUSER",
         "PGDATABASE",
         "PGPASSWORD",
+        "PGSERVICE",
+        "PGSERVICEFILE",
+        "PGSYSCONFDIR",
+        "PGPASSFILE",
+        "PGCONNECT_TIMEOUT",
+        "PGAPPNAME",
     ] {
         c.env_remove(v);
     }

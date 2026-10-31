@@ -166,6 +166,12 @@ fn qf(dir: &Path, url: Option<&str>, args: &[&str]) -> Out {
         "PGUSER",
         "PGDATABASE",
         "PGPASSWORD",
+        "PGSERVICE",
+        "PGSERVICEFILE",
+        "PGSYSCONFDIR",
+        "PGPASSFILE",
+        "PGCONNECT_TIMEOUT",
+        "PGAPPNAME",
         "PGSSLMODE",
     ] {
         c.env_remove(v);

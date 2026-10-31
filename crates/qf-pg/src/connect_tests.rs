@@ -401,3 +401,104 @@ fn multi_host_url_and_ipv6() {
     assert_eq!(c.config.get_hosts().len(), 2);
     assert_eq!(c.config.get_ports(), &[5433, 5434]);
 }
+
+#[test]
+fn full_url_ignores_other_pg_vars_and_only_gains_a_password() {
+    let home = tempfile::tempdir().unwrap();
+    let others = [
+        ("PGHOST", "envhost"),
+        ("PGPORT", "7777"),
+        ("PGDATABASE", "envdb"),
+        ("PGUSER", "envuser"),
+    ];
+    let url = "postgresql://app@127.0.0.1:25071/appdb";
+    let mut with_pw = others.to_vec();
+    with_pw.push(("PGPASSWORD", "envpw"));
+    let c = resolve(url, &env_in(home.path(), &with_pw)).unwrap();
+    assert_eq!(c.display_target, "127.0.0.1:25071/appdb");
+    assert_eq!(c.config.get_user(), Some("app"));
+    assert_eq!(password(&c).as_deref(), Some("envpw"));
+
+    write_private(
+        &user_dir(home.path()).join(pgpass_name()),
+        "envhost:7777:envdb:envuser:wrong\n127.0.0.1:25071:appdb:app:filepw\n",
+    );
+    let c = resolve(url, &env_in(home.path(), &others)).unwrap();
+    assert_eq!(c.display_target, "127.0.0.1:25071/appdb");
+    assert_eq!(c.config.get_user(), Some("app"));
+    assert_eq!(password(&c).as_deref(), Some("filepw"));
+}
+
+#[test]
+fn at_sign_in_query_without_path_does_not_hide_options() {
+    let home = tempfile::tempdir().unwrap();
+    let env = env_in(home.path(), &[("PGUSER", "envuser")]);
+    let c = resolve(
+        "postgres://h:5432?sslmode=require&application_name=a@b",
+        &env,
+    )
+    .unwrap();
+    assert_eq!(c.host_port(), "h:5432");
+    assert_eq!(c.ssl_mode(), SslMode::Require);
+    assert_eq!(c.config.get_user(), Some("envuser"));
+    assert_eq!(c.config.get_application_name(), Some("a@b"));
+}
+
+#[test]
+fn malformed_url_query_key_is_rejected() {
+    let home = tempfile::tempdir().unwrap();
+    let env = env_in(home.path(), &[]);
+    for url in [
+        "postgres://u@h/db?bad%20key=1",
+        "postgres://u@h/db?Host=x",
+        "postgres://u@h/db?a'b=1",
+    ] {
+        let e = resolve(url, &env).unwrap_err();
+        assert_eq!(e.code, "QF091", "{url}");
+    }
+}
+
+#[test]
+fn invalid_service_values_name_the_line_not_the_value() {
+    let home = tempfile::tempdir().unwrap();
+    let file = home.path().join("s.conf");
+    write_private(
+        &file,
+        "[a]\nsslmode=hunter2a\n[b]\nport=hunter2b\n[c]\nconnect_timeout=hunter2c\n\
+         [d]\nservicefile=/x\n[e]\nsslkeylogfile=/x\n",
+    );
+    let env = env_in(
+        home.path(),
+        &[("PGSERVICEFILE", &file.display().to_string())],
+    );
+    for (svc, key, line) in [
+        ("a", "sslmode", 2),
+        ("b", "port", 4),
+        ("c", "connect_timeout", 6),
+    ] {
+        let e = resolve(&format!("service={svc}"), &env).unwrap_err();
+        assert_eq!(e.code, "QF091");
+        assert!(e.message.contains(&format!("`{key}`")), "{e}");
+        assert!(e.message.contains(&format!("line {line}")), "{e}");
+        assert!(!format!("{e} {e:?}").contains("hunter2"), "{e:?}");
+    }
+    for (svc, key) in [("d", "servicefile"), ("e", "sslkeylogfile")] {
+        let e = resolve(&format!("service={svc}"), &env).unwrap_err();
+        assert!(
+            e.message
+                .contains(&format!("unsupported connection option `{key}`")),
+            "{e}"
+        );
+    }
+}
+
+#[test]
+fn empty_service_key_ignores_pgservice() {
+    let home = tempfile::tempdir().unwrap();
+    let env = env_in(home.path(), &[("PGSERVICE", "nosuch")]);
+    assert_eq!(resolve("host=h", &env).unwrap_err().code, "QF091");
+    let c = resolve("host=h service=", &env).unwrap();
+    assert_eq!(c.host_port(), "h:5432");
+    let c = resolve("postgres://u@h/db?service=", &env).unwrap();
+    assert_eq!(c.host_port(), "h:5432");
+}
