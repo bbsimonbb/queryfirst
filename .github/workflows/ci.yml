@@ -18,8 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain (from rust-toolchain.toml)
-        run: rustup show
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      - name: MSVC environment (windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
       - name: Install libclang (ubuntu)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libclang-dev
@@ -50,7 +53,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain (from rust-toolchain.toml)
-        run: rustup show
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      - run: cargo clippy --workspace --all-targets --features db-tests -- -D warnings
       - run: cargo test --workspace --features db-tests

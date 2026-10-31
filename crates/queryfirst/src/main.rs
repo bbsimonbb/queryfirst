@@ -46,10 +46,16 @@ fn find_project_dir(start: &Path) -> PathBuf {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let _project = cli.project.unwrap_or_else(|| {
-        let cwd = std::env::current_dir().expect("cannot read current directory");
-        find_project_dir(&cwd)
-    });
+    let _project = match cli.project {
+        Some(p) => p,
+        None => match std::env::current_dir() {
+            Ok(cwd) => find_project_dir(&cwd),
+            Err(e) => {
+                eprintln!("qf: cannot read current directory: {e}");
+                return ExitCode::from(2);
+            }
+        },
+    };
     let name = match cli.command {
         Command::Generate => "generate",
         Command::Check => "check",
