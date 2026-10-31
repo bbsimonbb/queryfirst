@@ -259,18 +259,35 @@ async fn enum_type_ref_has_sorted_values() {
 #[tokio::test]
 async fn undetermined_param_type_is_qf011_with_cast_hint() {
     with_db(|db| async move {
-        let lexed = lex("SELECT :p");
-        let err = describe(&db.pool, &lexed.db_statement)
-            .await
-            .expect_err("Postgres cannot type a bare parameter");
-        assert!(!qf_pg::is_connection_error(&err));
-        let diag = to_diagnostic(&err, &lexed, &db.catalog);
-        assert_eq!(diag.code, "QF011");
-        assert_eq!(diag.severity, Severity::Error);
-        let hint = diag.hint.expect("hint");
-        assert!(hint.contains(":p::"), "{hint}");
-        assert!(diag.message.contains(":p"), "{}", diag.message);
-        assert_eq!((diag.line, diag.col), (1, 8));
+        // (Not `SELECT :p`: Postgres types a bare select-list parameter as text.)
+        // Never typed at all: 42P18, without a position. Typed by one use but not by another:
+        // 42P08, positioned at the untyped use.
+        let cases = [
+            ("SELECT 1 WHERE :p IS NULL", "42P18", 16),
+            (
+                "SELECT id FROM customers WHERE :p IS NULL OR email = :p",
+                "42P08",
+                32,
+            ),
+        ];
+        for (sql, sqlstate, col) in cases {
+            let lexed = lex(sql);
+            let err = describe(&db.pool, &lexed.db_statement)
+                .await
+                .expect_err("Postgres cannot type the parameter");
+            assert!(!qf_pg::is_connection_error(&err));
+            match &err {
+                qf_pg::PgQueryError::Db { code, .. } => assert_eq!(code, sqlstate, "{sql}"),
+                other => panic!("{other:?}"),
+            }
+            let diag = to_diagnostic(&err, &lexed, &db.catalog);
+            assert_eq!(diag.code, "QF011", "{sql}");
+            assert_eq!(diag.severity, Severity::Error);
+            assert_eq!(diag.message, "could not determine the type of parameter :p");
+            let hint = diag.hint.expect("hint");
+            assert!(hint.contains(":p::"), "{hint}");
+            assert_eq!((diag.line, diag.col), (1, col), "{sql}");
+        }
     })
     .await;
 }
@@ -297,6 +314,57 @@ async fn undefined_column_did_you_mean() {
             diag.message,
             r#"relation "custmers" does not exist; did you mean "customers"?"#
         );
+
+        // Whatever the server's `lc_messages`, the name comes from the statement at the error
+        // position. (sql, message, col)
+        let s = &db.schema;
+        let on_customers =
+            r#"column "emial" does not exist on "customers"; did you mean "email"?"#.to_string();
+        let cases = [
+            (
+                "SELECT c.emial FROM customers c".to_string(),
+                on_customers.clone(),
+                8,
+            ),
+            (
+                "UPDATE customers SET emial = 'x'".to_string(),
+                on_customers.clone(),
+                22,
+            ),
+            (
+                "INSERT INTO customers (emial) VALUES ('x')".to_string(),
+                on_customers,
+                24,
+            ),
+            (
+                "SELECT i.totl FROM invoices i".to_string(),
+                r#"column "totl" does not exist on "invoices"; did you mean "total"?"#.to_string(),
+                8,
+            ),
+            (
+                format!("SELECT 1 FROM {s}.invoics"),
+                format!(r#"relation "{s}.invoics" does not exist; did you mean "invoices"?"#),
+                15,
+            ),
+        ];
+        for (sql, message, col) in cases {
+            let lexed = lex(&sql);
+            let err = describe(&db.pool, &lexed.db_statement).await.unwrap_err();
+            let diag = to_diagnostic(&err, &lexed, &db.catalog);
+            assert_eq!(diag.code, "QF010", "{sql}");
+            assert_eq!(diag.message, message, "{sql}");
+            assert_eq!((diag.line, diag.col), (1, col), "{sql}");
+        }
+
+        // 42P01 "missing FROM-clause entry" is not a missing relation: the server's message.
+        let lexed = lex("SELECT x.id FROM customers");
+        let err = describe(&db.pool, &lexed.db_statement).await.unwrap_err();
+        let diag = to_diagnostic(&err, &lexed, &db.catalog);
+        let qf_pg::PgQueryError::Db { code, message, .. } = &err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(code, "42P01");
+        assert_eq!(&diag.message, message);
     })
     .await;
 }

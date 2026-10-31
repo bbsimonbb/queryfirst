@@ -277,7 +277,7 @@ fn broken_query_three_channels() {
     assert_eq!(out.code, 1, "{}", out.stderr);
     assert!(
         out.stderr.contains(
-            "app/get-invoice.psql:2:12: error[QF010]: column \"vat_rate\" does not exist"
+            "app/get-invoice.psql:2:12: error[QF010]: column \"vat_rate\" does not exist on \"invoices\"\n"
         ),
         "{}",
         out.stderr

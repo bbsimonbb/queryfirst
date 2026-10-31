@@ -379,6 +379,42 @@ impl Catalog {
         Some(&self.tables[*i])
     }
 
+    /// A catalog of just `tables` (each `(schema, name, columns)`), for unit tests.
+    #[cfg(test)]
+    pub(crate) fn for_tests(tables: &[(&str, &str, &[&str])], search_path: &[&str]) -> Catalog {
+        let mut cat = Catalog {
+            search_path: search_path.iter().map(|s| s.to_string()).collect(),
+            ..Catalog::default()
+        };
+        for (i, (schema, name, columns)) in tables.iter().enumerate() {
+            let oid = 1000 + i as u32;
+            cat.by_name
+                .insert((schema.to_string(), name.to_string()), i);
+            let mut cols = Vec::new();
+            for (n, c) in columns.iter().enumerate() {
+                cat.columns.insert((oid, n as i16 + 1), (i, n));
+                cols.push(CatalogColumn {
+                    schema: schema.to_string(),
+                    table: name.to_string(),
+                    name: c.to_string(),
+                    not_null: false,
+                    has_default: false,
+                    db_type: cat.type_ref(0, -1),
+                });
+            }
+            cat.tables.push(CatalogTable {
+                oid,
+                schema: schema.to_string(),
+                name: name.to_string(),
+                kind: 'r',
+                columns: cols,
+                hooks_insert: false,
+                hooks_update: false,
+            });
+        }
+        cat
+    }
+
     /// Table names in `schema`, or on the search path, for did-you-mean.
     pub(crate) fn table_names(&self, schema: Option<&str>) -> Vec<String> {
         self.tables
