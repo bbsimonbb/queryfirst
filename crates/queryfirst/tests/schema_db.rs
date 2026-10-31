@@ -204,12 +204,18 @@ fn json_shape() {
     assert_eq!(tables[0]["columns"][1]["nullable"], false);
     assert_eq!(tables[0]["columns"][2]["nullable"], true);
     assert!(tables[0]["columns"][0]["default"].is_string());
+    // Foreign keys come in constraint-name order: invoices_address_id_fkey, then
+    // invoices_customer_id_fkey.
+    let fks = tables[1]["foreignKeys"].as_array().unwrap();
+    assert_eq!(fks.len(), 2, "{}", o.stdout);
+    assert_eq!(fks[0]["columns"], serde_json::json!(["address_id"]));
     assert_eq!(
-        tables[1]["foreignKeys"][0]["columns"],
-        serde_json::json!(["customer_id"])
+        fks[0]["references"]["table"],
+        format!("{}.addresses", db.schema)
     );
+    assert_eq!(fks[1]["columns"], serde_json::json!(["customer_id"]));
     assert_eq!(
-        tables[1]["foreignKeys"][0]["references"]["table"],
+        fks[1]["references"]["table"],
         format!("{}.customers", db.schema)
     );
     assert_eq!(

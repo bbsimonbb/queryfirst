@@ -86,20 +86,32 @@ impl SchemaInfo {
     }
 
     /// Up to three table names (`schema.name`) within Levenshtein distance 2 of `arg`, closest
-    /// first. A bare `arg` is compared with the bare table names.
+    /// first. A qualified `arg` is compared with the qualified names. A bare `arg` is compared
+    /// with the bare names of the tables on the search path (those it would resolve to); only
+    /// when none is close, with those of other schemas (as [`SchemaInfo::find`] falls back to a
+    /// unique table anywhere).
     pub fn suggest(&self, arg: &str) -> Vec<String> {
         let qualified = arg.contains('.');
-        let mut found: Vec<(usize, String)> = self
-            .tables
-            .iter()
-            .filter_map(|t| {
-                let full = t.qualified();
-                let d = strsim::levenshtein(arg, if qualified { &full } else { &t.name });
-                (d <= 2).then_some((d, full))
-            })
-            .collect();
-        found.sort();
-        found.into_iter().take(3).map(|(_, n)| n).collect()
+        let near = |tables: &mut dyn Iterator<Item = &SchemaTable>| -> Vec<String> {
+            let mut found: Vec<(usize, String)> = tables
+                .filter_map(|t| {
+                    let full = t.qualified();
+                    let d = strsim::levenshtein(arg, if qualified { &full } else { &t.name });
+                    (d <= 2).then_some((d, full))
+                })
+                .collect();
+            found.sort();
+            found.into_iter().take(3).map(|(_, n)| n).collect()
+        };
+        if qualified {
+            return near(&mut self.tables.iter());
+        }
+        let on_path = |t: &&SchemaTable| self.search_path.contains(&t.schema);
+        let found = near(&mut self.tables.iter().filter(on_path));
+        if !found.is_empty() {
+            return found;
+        }
+        near(&mut self.tables.iter().filter(|t| !on_path(t)))
     }
 }
 
@@ -221,7 +233,13 @@ mod tests {
     fn suggest_is_close_and_sorted() {
         let i = info();
         assert_eq!(i.suggest("custmers"), vec!["public.customers"]);
-        assert_eq!(i.suggest("user"), vec!["audit.users", "public.users"]);
+        // Bare names: the search path's tables only, while one of them is close.
+        assert_eq!(i.suggest("user"), vec!["public.users"]);
+        assert_eq!(i.suggest("evnts"), vec!["audit.events"]);
+        assert_eq!(i.suggest("audit.user"), vec!["audit.users"]);
+        let mut no_path = info();
+        no_path.search_path.clear();
+        assert_eq!(no_path.suggest("user"), vec!["audit.users", "public.users"]);
         assert!(i.suggest("zzzzzz").is_empty());
     }
 }
