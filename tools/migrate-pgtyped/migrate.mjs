@@ -114,14 +114,39 @@ function symbolsOf(name) {
   return [name, `I${P}Params`, `I${P}Result`, `I${P}Query`];
 }
 
-const STMT_OR_STRING = new RegExp(
-  String.raw`\b(import|export)(\s+type)?(\s*)\{([^}]*)\}(\s*from\s*)(["'])([^"'\n]+?\.queries(?:\.(?:ts|js))?)\6(;?)` +
-    "|" +
-    String.raw`(["'])([^"'\n]*\.queries(?:\.(?:ts|js))?)\9`,
+const SPEC = String.raw`[^"'\n]*?\.queries(?:\.(?:ts|js))?`;
+const SRC_RE = new RegExp(
+  String.raw`\b(?<kw>import|export)(?<type>\s+type)?(?<ws>\s*)(?:(?<def>[\w$]+)\s*,\s*)?\{(?<raw>[^}]*)\}(?<from>\s*from\s*)(?<q>["'])(?<spec>${SPEC})\k<q>(?<semi>;?)` +
+    String.raw`|\b(?<fn>vi|jest)\.mock\(\s*(?<mq>["'])(?<mspec>${SPEC})\k<mq>(?<mtail>\s*(?:,\s*)?)` +
+    String.raw`|(?<gq>["'])(?<gspec>${SPEC})\k<gq>`,
   "g",
 );
 
 const toQuerySpec = (spec) => spec.replace(/\.queries(?=(?:\.(?:ts|js))?$)/, ".query");
+
+/** Index of the `)` closing a call whose arguments start at `from`, or -1. Skips strings and comments. */
+function findCallEnd(text, from) {
+  let depth = 0;
+  for (let i = from; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"' || c === "'" || c === "`") {
+      for (i++; i < text.length && text[i] !== c; i++) if (text[i] === "\\") i++;
+    } else if (c === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i++;
+    } else if (c === "/" && text[i + 1] === "*") {
+      const e = text.indexOf("*/", i + 2);
+      if (e < 0) return -1;
+      i = e + 1;
+    } else if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") {
+      if (depth === 0) return c === ")" ? i : -1;
+      depth--;
+    }
+  }
+  return -1;
+}
+
+const keyRe = (name) => new RegExp(String.raw`(?<![\w$.])${name.replace(/\$/g, "\\$")}\s*(?::|,|\}|\()`);
 
 /** Rewrite one TS file's text. Returns {text, specifiers, manual:[{specifier, reason}]}. */
 function rewriteSource(text, file, splitMap, aliases) {
@@ -136,62 +161,207 @@ function rewriteSource(text, file, splitMap, aliases) {
     }
     return null;
   };
-  const out = text.replace(STMT_OR_STRING, (...m) => {
-    if (m[1]) {
-      const [whole, kw, type = "", ws, raw, from, q, spec, semi] = m;
-      specifiers++;
-      const split = splitFor(spec);
-      if (!split) return `${kw}${type}${ws}{${raw}}${from}${q}${toQuerySpec(spec)}${q}${semi}`;
-      const members = raw.split(",").map((s) => s.trim()).filter(Boolean);
-      const groups = new Map();
-      for (const mem of members) {
-        const name = mem.replace(/^type\s+/, "").split(/\s+as\s+/)[0].trim();
-        const q2 = split.symbols.get(name);
-        if (!q2) {
-          manual.push({ specifier: spec, reason: `symbol "${name}" not exported by any split query` });
-          return whole;
-        }
-        if (!groups.has(q2)) groups.set(q2, []);
-        groups.get(q2).push(mem);
-      }
-      const multi = raw.includes("\n");
-      const indent = (raw.match(/\n([ \t]+)\S/) ?? [])[1] ?? "  ";
-      const comma = /,\s*$/.test(raw);
-      const prefix = spec.slice(0, spec.lastIndexOf("/") + 1);
-      const ext = (spec.match(/\.queries(\.(?:ts|js))?$/) ?? [])[1] ?? "";
-      return [...groups]
-        .map(([qn, mems]) => {
-          const body = multi
-            ? `{${eol}${mems.map((x, i) => indent + x + (i < mems.length - 1 || comma ? "," : "")).join(eol)}${eol}}`
-            : `{${raw.startsWith(" ") ? " " : ""}${mems.join(", ")}${/\s$/.test(raw) ? " " : ""}}`;
-          return `${kw}${type}${ws}${body}${from}${q}${prefix}${kebab(qn)}.query${ext}${q}${semi}`;
-        })
-        .join(eol);
-    }
-    const [whole, , , , , , , , , q, spec] = m;
+  const targetSpec = (spec, qn) => {
+    const ext = (spec.match(/\.queries(\.(?:ts|js))?$/) ?? [])[1] ?? "";
+    return `${spec.slice(0, spec.lastIndexOf("/") + 1)}${kebab(qn)}.query${ext}`;
+  };
+  let out = "";
+  let last = 0;
+  SRC_RE.lastIndex = 0;
+  let m;
+  while ((m = SRC_RE.exec(text))) {
+    const g = m.groups;
+    const whole = m[0];
+    let end = m.index + whole.length;
+    let rep;
     specifiers++;
-    if (splitFor(spec)) {
-      manual.push({ specifier: spec, reason: "reference to a split module outside an import/export list (vi.mock, require, import(), default/namespace import)" });
-      return whole;
-    }
-    return `${q}${toQuerySpec(spec)}${q}`;
-  });
+    if (g.kw) {
+      const split = splitFor(g.spec);
+      if (!split) {
+        rep = whole.replace(g.spec, toQuerySpec(g.spec));
+      } else {
+        const members = g.raw.split(",").map((s) => s.trim()).filter(Boolean);
+        const groups = new Map();
+        const shared = new Set();
+        let bad = null;
+        for (const mem of members) {
+          const name = mem.replace(/^type\s+/, "").split(/\s+as\s+/)[0].trim();
+          const qn = split.symbols.get(name);
+          if (qn) {
+            if (!groups.has(qn)) groups.set(qn, []);
+            groups.get(qn).push(mem);
+          } else if (split.shared.has(name)) shared.add(mem);
+          else bad = name;
+        }
+        if (bad) {
+          manual.push({ specifier: g.spec, reason: `symbol "${bad}" is not exported by the generated module` });
+          rep = whole;
+        } else {
+          // Shared helper types (Json, DateOrString, ...) are identical in every split file: keep them with the
+          // first query group of this import, or the split's first query when the import has only shared types.
+          const firstKey = groups.size ? groups.keys().next().value : split.firstName;
+          const firstMems = new Set([...(groups.get(firstKey) ?? []), ...shared]);
+          groups.set(firstKey, members.filter((x) => firstMems.has(x)));
+          const multi = g.raw.includes("\n");
+          const indent = (g.raw.match(/\n([ \t]+)\S/) ?? [])[1] ?? "  ";
+          const comma = /,\s*$/.test(g.raw);
+          rep = [...groups]
+            .map(([qn, mems], gi) => {
+              const body = multi
+                ? `{${eol}${mems.map((x, i) => indent + x + (i < mems.length - 1 || comma ? "," : "")).join(eol)}${eol}}`
+                : `{${g.raw.startsWith(" ") ? " " : ""}${mems.join(", ")}${/\s$/.test(g.raw) ? " " : ""}}`;
+              const def = gi === 0 && g.def ? `${g.def}, ` : "";
+              return `${g.kw}${g.type ?? ""}${g.ws}${def}${body}${g.from}${g.q}${targetSpec(g.spec, qn)}${g.q}${g.semi}`;
+            })
+            .join(eol);
+        }
+      }
+    } else if (g.fn) {
+      const split = splitFor(g.mspec);
+      if (!split) {
+        rep = whole.replace(g.mspec, toQuerySpec(g.mspec));
+      } else {
+        const head = whole.slice(0, whole.length - g.mtail.length - g.mspec.length - 2);
+        const hasFactory = g.mtail.includes(",");
+        const close = findCallEnd(text, end);
+        const factory = close < 0 ? null : text.slice(end, close);
+        let names = null;
+        if (close >= 0 && !hasFactory && factory.trim() === "") names = split.names;
+        else if (close >= 0 && hasFactory && factory.trim() !== "") {
+          names = split.names.filter((n) => split.querySymbols.get(n).some((s) => keyRe(s).test(factory)));
+        }
+        if (!names || names.length === 0) {
+          manual.push({ specifier: g.mspec, reason: `${g.fn}.mock of a split module: no query name found as a key in the factory` });
+          rep = whole;
+        } else {
+          const lineStart = text.lastIndexOf("\n", m.index) + 1;
+          const lead = text.slice(lineStart, m.index);
+          const pad = /^\s*$/.test(lead) ? lead : "";
+          rep = names
+            .map((qn) => `${head}${g.mq}${targetSpec(g.mspec, qn)}${g.mq}${g.mtail}${factory})`)
+            .join(eol + pad);
+          end = close + 1;
+        }
+      }
+    } else if (splitFor(g.gspec)) {
+      manual.push({ specifier: g.gspec, reason: "reference to a split module outside an import/export list or mock (require, import(), namespace import)" });
+      rep = whole;
+    } else rep = `${g.gq}${toQuerySpec(g.gspec)}${g.gq}`;
+    out += text.slice(last, m.index) + rep;
+    last = end;
+    SRC_RE.lastIndex = end;
+  }
+  out += text.slice(last);
   return { text: out, specifiers, manual };
 }
 
+// ---- scope (which query files the codemod may touch) ----
+
+function globToRegExp(glob) {
+  const g = glob.replaceAll("\\", "/").replace(/^\.\//, "");
+  let re = "";
+  let braces = 0;
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i];
+    if (c === "*") {
+      if (g[i + 1] === "*") {
+        i++;
+        if (g[i + 1] === "/") {
+          i++;
+          re += "(?:.*/)?";
+        } else re += ".*";
+      } else re += "[^/]*";
+    } else if (c === "?") re += "[^/]";
+    else if (c === "{") {
+      braces++;
+      re += "(?:";
+    } else if (c === "}" && braces) {
+      braces--;
+      re += ")";
+    } else if (c === "," && braces) re += "|";
+    else if (c === "[") {
+      const e = g.indexOf("]", i);
+      if (e > i) {
+        re += g.slice(i, e + 1);
+        i = e;
+      } else re += "\\[";
+    } else re += c.replace(/[.+^$()|\\\]}{]/g, "\\$&");
+  }
+  return new RegExp(`^${re}$`);
+}
+
+const readJson = (f) => JSON.parse(stripJsonc(readFileSync(f, "utf8")));
+const asArray = (v) => (v == null ? [] : Array.isArray(v) ? v : [v]);
+const DEFAULT_INCLUDE = ["**/*.psql", "**/*.sql"];
+const DEFAULT_EXCLUDE = ["**/node_modules/**"];
+
+/**
+ * Which files may be split: command line > queryfirst.json > pgtyped-config.json.
+ * Returns {source, include, exclude} or null when nothing defines a scope.
+ */
+export function resolveScope(root, opts = {}) {
+  const oi = asArray(opts.include);
+  const oe = asArray(opts.exclude);
+  let base = null;
+  const qf = join(root, "queryfirst.json");
+  const pg = join(root, "pgtyped-config.json");
+  if (existsSync(qf)) {
+    const c = readJson(qf);
+    base = { source: "queryfirst.json", include: c.include ?? DEFAULT_INCLUDE, exclude: c.exclude ?? DEFAULT_EXCLUDE };
+  } else if (existsSync(pg)) {
+    const c = readJson(pg);
+    const src = String(c.srcDir ?? ".").replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/+$/, "");
+    const prefix = src && src !== "." ? `${src}/` : "";
+    const include = [];
+    for (const t of asArray(c.transforms)) {
+      if (t.mode !== "sql") continue;
+      for (const i of asArray(t.include)) include.push(prefix + i.replace(/^\.\//, ""));
+    }
+    if (include.length) base = { source: "pgtyped-config.json", include, exclude: DEFAULT_EXCLUDE };
+  }
+  if (!oi.length && !oe.length) return base;
+  return {
+    source: base ? `command line over ${base.source}` : "command line",
+    include: oi.length ? oi : (base?.include ?? DEFAULT_INCLUDE),
+    exclude: oe.length ? oe : (base?.exclude ?? DEFAULT_EXCLUDE),
+  };
+}
+
+export class NoScopeError extends Error {}
+
 /** Compute the migration plan without writing anything. */
-export function planMigration(project) {
+export function planMigration(project, opts = {}) {
   const root = resolve(project);
+  const scope = resolveScope(root, opts);
+  if (!scope) {
+    throw new NoScopeError(
+      "no scope: found neither queryfirst.json nor pgtyped-config.json with a sql transform; pass --include <glob> (and optionally --exclude <glob>)",
+    );
+  }
+  const inc = scope.include.map(globToRegExp);
+  const exc = scope.exclude.map(globToRegExp);
+  const inScope = (file) => {
+    const rel = relative(root, file).split(sep).join("/");
+    return inc.some((r) => r.test(rel)) && !exc.some((r) => r.test(rel));
+  };
   const aliases = loadAliases(root);
   const splits = [];
+  const skipped = [];
   const conflicts = [];
   const splitMap = new Map();
   const claimed = new Map();
 
   for (const file of walk(root, [".psql", ".sql"])) {
+    if (!inScope(file)) continue;
     const text = readFileSync(file, "utf8");
     const qs = parseQueries(text);
     if (qs.length < 2) continue;
+    const stem = file.slice(0, file.length - extname(file).length);
+    const generated = `${stem}.queries.ts`;
+    if (!existsSync(generated)) {
+      skipped.push({ file, reason: "no sibling .queries.ts; not a pgtyped-managed file" });
+      continue;
+    }
     const eol = text.includes("\r\n") ? "\r\n" : "\n";
     const names = new Set();
     const preamble = text.slice(0, qs[0].start).trim() ? text.slice(0, qs[0].start) : "";
@@ -209,8 +379,21 @@ export function planMigration(project) {
       if (norm(target) !== norm(file) && existsSync(target)) conflicts.push(`${target}: already exists (splitting ${file})`);
     }
     const symbols = new Map();
-    for (const t of targets) for (const s of symbolsOf(t.name)) symbols.set(s, t.name);
-    splitMap.set(norm(file.slice(0, file.length - extname(file).length)), { symbols });
+    const querySymbols = new Map();
+    for (const t of targets) {
+      const syms = symbolsOf(t.name);
+      querySymbols.set(t.name, syms);
+      for (const s of syms) symbols.set(s, t.name);
+    }
+    const exported = [
+      ...readFileSync(generated, "utf8").matchAll(/^export\s+(?:declare\s+)?(?:type|interface|const|enum|class|function|let|var)\s+([\w$]+)/gm),
+    ].map((x) => x[1]);
+    const shared = new Set(exported.filter((n) => !symbols.has(n)));
+    const key = norm(stem);
+    if (splitMap.has(key)) {
+      conflicts.push(`${file}: collides with ${splitMap.get(key).file} (same name, different extension; both generate ${basename(generated)})`);
+    }
+    splitMap.set(key, { file, symbols, querySymbols, shared, names: targets.map((t) => t.name), firstName: targets[0].name });
     splits.push({ file, targets });
   }
 
@@ -222,13 +405,12 @@ export function planMigration(project) {
     if (!text.includes(".queries")) continue;
     const r = rewriteSource(text, file, splitMap, aliases);
     for (const mn of r.manual) manual.push({ file, ...mn });
-    const changed = r.text !== text;
     const rewrittenCount = r.specifiers - r.manual.length;
     if (rewrittenCount > 0 || r.manual.length) {
-      rewrites.push({ file, specifiers: rewrittenCount, text: r.text, changed });
+      rewrites.push({ file, specifiers: rewrittenCount, text: r.text, changed: r.text !== text });
     }
   }
-  return { root, splits, rewrites, manual, conflicts };
+  return { root, scope, splits, skipped, rewrites, manual, conflicts };
 }
 
 export function applyPlan(plan) {
@@ -243,10 +425,12 @@ export function applyPlan(plan) {
 
 function summarize(plan, dryRun, log) {
   const rel = (p) => relative(plan.root, p).split(sep).join("/");
+  log(`scope: ${plan.scope.source} (include ${plan.scope.include.join(", ")}; exclude ${plan.scope.exclude.join(", ")})`);
   for (const s of plan.splits) {
     log(`split ${rel(s.file)} ->`);
     for (const t of s.targets) log(`    ${rel(t.path)}`);
   }
+  for (const s of plan.skipped) log(`skipped ${rel(s.file)}: ${s.reason}`);
   if (dryRun) for (const r of plan.rewrites) if (r.specifiers) log(`rewrite imports in ${rel(r.file)} (${r.specifiers})`);
   for (const m of plan.manual) log(`MANUAL REVIEW ${rel(m.file)}: "${m.specifier}" - ${m.reason}`);
   const imports = plan.rewrites.reduce((n, r) => n + r.specifiers, 0);
@@ -256,25 +440,50 @@ function summarize(plan, dryRun, log) {
   log(`  files split: ${plan.splits.length} (${plan.splits.reduce((n, s) => n + s.targets.length, 0)} query files)`);
   log(`  imports rewritten: ${imports}`);
   log(`  TypeScript files touched: ${touched}`);
+  log(`  skipped (unmanaged): ${plan.skipped.length}`);
   log(`  needing manual review: ${plan.manual.length}`);
   if (!dryRun) log("Next: run `qf generate`, review, then delete the old *.queries.ts files.");
 }
 
 export function main(argv) {
-  const args = argv.slice();
-  const dryRun = args.includes("--dry-run");
-  const rest = args.filter((a) => a !== "--dry-run");
-  const unknown = rest.filter((a) => a.startsWith("-"));
-  const usage = "usage: node migrate.mjs <project> [--dry-run]";
-  if (unknown.length || rest.length !== 1) {
-    console.error(unknown.length ? `unknown option ${unknown[0]}\n${usage}` : usage);
+  const usage = "usage: node migrate.mjs <project> [--dry-run] [--include <glob>]... [--exclude <glob>]...";
+  let dryRun = false;
+  const positional = [];
+  const opts = { include: [], exclude: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    const eq = a.match(/^--(include|exclude)=(.+)$/);
+    if (a === "--dry-run") dryRun = true;
+    else if (eq) opts[eq[1]].push(eq[2]);
+    else if (a === "--include" || a === "--exclude") {
+      if (i + 1 >= argv.length) {
+        console.error(`${a} needs a glob\n${usage}`);
+        return 2;
+      }
+      opts[a.slice(2)].push(argv[++i]);
+    } else if (a.startsWith("-")) {
+      console.error(`unknown option ${a}\n${usage}`);
+      return 2;
+    } else positional.push(a);
+  }
+  if (positional.length !== 1) {
+    console.error(usage);
     return 2;
   }
-  if (!existsSync(rest[0]) || !statSync(rest[0]).isDirectory()) {
-    console.error(`not a directory: ${rest[0]}\n${usage}`);
+  if (!existsSync(positional[0]) || !statSync(positional[0]).isDirectory()) {
+    console.error(`not a directory: ${positional[0]}\n${usage}`);
     return 2;
   }
-  const plan = planMigration(rest[0]);
+  let plan;
+  try {
+    plan = planMigration(positional[0], opts);
+  } catch (e) {
+    if (e instanceof NoScopeError) {
+      console.error(`${e.message}\n${usage}`);
+      return 2;
+    }
+    throw e;
+  }
   if (plan.conflicts.length) {
     console.error("Queryfirst migration aborted; nothing was written. Conflicts:");
     for (const c of plan.conflicts) console.error(`  ${c}`);
