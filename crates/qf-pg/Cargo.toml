@@ -11,3 +11,12 @@ db-tests = []
 qf-meta.workspace = true
 qf-sqlfile.workspace = true
 pg_query.workspace = true
+tokio = { version = "1.54", features = ["rt", "sync", "time", "net"] }
+tokio-postgres = "0.7.18"
+tokio-postgres-rustls = { version = "0.14.0", features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
+strsim = "0.11.1"
+
+[dev-dependencies]
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros"] }
