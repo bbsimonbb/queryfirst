@@ -566,6 +566,7 @@ fn apply_type_overrides(
 /// A file that could not be read or parsed: broken, keeping what the previous meta knew.
 fn broken_unparsed(
     source: &str,
+    name_path: &Path,
     normalised: &str,
     diagnostics: Vec<Diagnostic>,
     previous: Option<&QueryMeta>,
@@ -573,7 +574,7 @@ fn broken_unparsed(
     let mut meta = QueryMeta {
         version: META_VERSION,
         source: source.to_string(),
-        name: previous.map_or_else(|| name_from_path(Path::new(source)), |p| p.name.clone()),
+        name: previous.map_or_else(|| name_from_path(name_path), |p| p.name.clone()),
         description: previous.and_then(|p| p.description.clone()),
         sql_hash: sha256_tag(normalised.as_bytes()),
         provider: Provider::Postgres,
@@ -615,27 +616,54 @@ pub async fn analyze_file<D: Describe>(
     let source = posix(rel);
     // A meta at this path written for another source (`q.sql` vs `q.psql`) is not ours.
     let previous = read_meta(&project.join(meta_path_for(rel))).filter(|m| m.source == source);
+    analyze_path(&project.join(rel), &source, rel, db, cat, previous.as_ref()).await
+}
+
+/// Read the file at `path` and analyze it as [`analyze_text`] does; a file that cannot be read
+/// is a broken query (`QF001`).
+pub async fn analyze_path<D: Describe>(
+    path: &Path,
+    source: &str,
+    name_path: &Path,
+    db: &D,
+    cat: &Catalog,
+    previous: Option<&QueryMeta>,
+) -> Result<Analyzed, ConnError> {
     let unreadable = |message: String| {
         let d = error("QF001", (1, 1), message, None);
-        broken_unparsed(&source, "", vec![d], previous.as_ref())
+        broken_unparsed(source, name_path, "", vec![d], previous)
     };
-    let bytes = match std::fs::read(project.join(rel)) {
+    let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => return Ok(unreadable(format!("cannot read {source}: {e}"))),
     };
     let Ok(text) = String::from_utf8(bytes) else {
         return Ok(unreadable(format!("{source} is not valid UTF-8")));
     };
-    let normalised = normalise(&text);
-    let q = match parse_query_file(Path::new(&source), &normalised) {
+    analyze_text(source, name_path, &text, db, cat, previous).await
+}
+
+/// Normalise, parse, describe and analyze the text of one query. `source` is what the meta and
+/// diagnostics call it; `name_path` is the path its default name comes from (`get-order.sql`
+/// becomes `getOrder`). Used for files and for `qf describe`'s virtual `<sql>` file.
+pub async fn analyze_text<D: Describe>(
+    source: &str,
+    name_path: &Path,
+    text: &str,
+    db: &D,
+    cat: &Catalog,
+    previous: Option<&QueryMeta>,
+) -> Result<Analyzed, ConnError> {
+    let normalised = normalise(text);
+    let q = match parse_query_file(name_path, &normalised) {
         Ok(q) => q,
-        Err(d) => return Ok(broken_unparsed(&source, &normalised, d, previous.as_ref())),
+        Err(d) => return Ok(broken_unparsed(source, name_path, &normalised, d, previous)),
     };
     let src = QuerySource {
-        source: &source,
+        source,
         normalised: &normalised,
     };
-    analyze_query(&src, &q, db, cat, previous.as_ref()).await
+    analyze_query(&src, &q, db, cat, previous).await
 }
 
 /// Analyze `files` (project-relative) concurrently, at most `cfg.pool` at a time. Results are in

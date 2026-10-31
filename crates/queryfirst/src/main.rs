@@ -30,6 +30,17 @@ enum Command {
         #[arg(long, value_name = "CONN")]
         db: Option<String>,
     },
+    /// Describe one query (a file, --sql, or stdin) against any database; writes nothing.
+    Describe {
+        /// The query file, relative to the current directory.
+        file: Option<PathBuf>,
+        /// The query text, as the body of a virtual file named `adhoc`.
+        #[arg(long, value_name = "TEXT")]
+        sql: Option<String>,
+        /// Connection string (overrides the configured environment variable).
+        #[arg(long, value_name = "CONN")]
+        db: Option<String>,
+    },
     /// Validate query files without writing output.
     Check,
     /// Run query tests against the database.
@@ -75,6 +86,20 @@ fn main() -> ExitCode {
                 })
                 .collect();
             let code = queryfirst::cmd::generate::run(&project, &paths, db.as_deref(), cli.json);
+            return ExitCode::from(code);
+        }
+        Command::Describe { file, sql, db } => {
+            let file = file.map(|p| match &cwd {
+                Ok(cwd) if p.is_relative() => cwd.join(p),
+                _ => p,
+            });
+            let code = queryfirst::cmd::describe::run(
+                &project,
+                file.as_deref(),
+                sql.as_deref(),
+                db.as_deref(),
+                cli.json,
+            );
             return ExitCode::from(code);
         }
         Command::Check => "check",

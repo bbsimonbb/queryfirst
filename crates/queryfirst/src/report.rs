@@ -133,6 +133,23 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 
 /// `path:line:col: error[QFnnn]: message`, then `  hint: …`, then a summary line.
 pub fn render_human(r: &Report) -> String {
+    let mut out = render_diagnostics(r);
+    let s = &r.summary;
+    out.push_str(&format!(
+        "Queryfirst {}: {}, {}, {}; {} written, {} deleted
+",
+        r.command,
+        plural(s.queries, "query", "queries"),
+        plural(s.errors, "error", "errors"),
+        plural(s.warnings, "warning", "warnings"),
+        plural(s.written, "file", "files"),
+        s.deleted
+    ));
+    out
+}
+
+/// Just the diagnostics of [`render_human`], without the summary line.
+pub fn render_diagnostics(r: &Report) -> String {
     let mut out = String::new();
     for d in &r.diagnostics {
         let sev = severity_str(d.severity);
@@ -146,16 +163,6 @@ pub fn render_human(r: &Report) -> String {
             out.push_str(&format!("  hint: {}\n", h.replace('\n', "\n        ")));
         }
     }
-    let s = &r.summary;
-    out.push_str(&format!(
-        "Queryfirst {}: {}, {}, {}; {} written, {} deleted\n",
-        r.command,
-        plural(s.queries, "query", "queries"),
-        plural(s.errors, "error", "errors"),
-        plural(s.warnings, "warning", "warnings"),
-        plural(s.written, "file", "files"),
-        s.deleted
-    ));
     out
 }
 
