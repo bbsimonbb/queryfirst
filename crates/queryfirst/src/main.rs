@@ -41,8 +41,11 @@ enum Command {
         #[arg(long, value_name = "CONN")]
         db: Option<String>,
     },
-    /// Validate query files without writing output.
-    Check,
+    /// Verify, offline, that meta files and wrappers match their query files.
+    Check {
+        /// Files or directories to narrow the scope (taken literally, never globbed).
+        paths: Vec<PathBuf>,
+    },
     /// Run query tests against the database.
     Test,
     /// Bundle generated output.
@@ -102,7 +105,17 @@ fn main() -> ExitCode {
             );
             return ExitCode::from(code);
         }
-        Command::Check => "check",
+        Command::Check { paths } => {
+            let paths: Vec<PathBuf> = paths
+                .into_iter()
+                .map(|p| match &cwd {
+                    Ok(cwd) if p.is_relative() => cwd.join(p),
+                    _ => p,
+                })
+                .collect();
+            let code = queryfirst::cmd::check::run(&project, &paths, cli.json);
+            return ExitCode::from(code);
+        }
         Command::Test => "test",
         Command::Bundle => "bundle",
         Command::Schema => "schema",
