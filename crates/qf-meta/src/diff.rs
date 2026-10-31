@@ -12,7 +12,9 @@ pub struct Difference {
     pub message: String,
 }
 
-fn fmt_type(t: &TypeRef) -> String {
+/// A type in the notation meta files and reports use: `numeric(12,2)`, `text[]`; the schema
+/// only when it is not `pg_catalog`.
+pub fn fmt_type(t: &TypeRef) -> String {
     let mut s = String::new();
     if t.schema != "pg_catalog" {
         s.push_str(&t.schema);

@@ -9,6 +9,7 @@ mod describe;
 mod errors;
 mod nullability;
 mod required;
+mod schema_info;
 
 pub use catalog::{Catalog, CatalogColumn, CatalogTable, WriteOp};
 pub use connect::{
@@ -19,6 +20,7 @@ pub use describe::{Described, DescribedColumn, describe};
 pub use errors::{PgQueryError, is_connection_error, to_diagnostic};
 pub use nullability::{CatalogView, ColumnNullability, analyze_columns, apply_alias_overrides};
 pub use required::{ParamRequirement, infer_required};
+pub use schema_info::{ForeignKey, SchemaColumn, SchemaInfo, SchemaTable};
 
 /// Format a Postgres type modifier (`atttypmod`) for the type `name` (the element type for
 /// arrays), e.g. `(12,2)` for `numeric`, `(30)` for `varchar`. `None` when there is none.

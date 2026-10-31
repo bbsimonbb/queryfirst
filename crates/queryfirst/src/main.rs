@@ -70,8 +70,15 @@ enum Command {
         #[arg(short = 'o', long = "output", value_name = "FILE")]
         output: Option<PathBuf>,
     },
-    /// Inspect the database schema.
-    Schema,
+    /// Show the database schema: tables and views, or the columns, keys and enums of the named
+    /// tables. Read-only.
+    Schema {
+        /// Tables to detail (`name` or `schema.name`); none lists every table and view.
+        tables: Vec<String>,
+        /// Connection string (overrides the configured environment variable).
+        #[arg(long, value_name = "CONN")]
+        db: Option<String>,
+    },
     /// Initialise a Queryfirst project.
     Init,
 }
@@ -178,7 +185,10 @@ fn main() -> ExitCode {
             let code = queryfirst::cmd::bundle::run(&project, output.as_deref(), cli.json);
             return ExitCode::from(code);
         }
-        Command::Schema => "schema",
+        Command::Schema { tables, db } => {
+            let code = queryfirst::cmd::schema::run(&project, &tables, db.as_deref(), cli.json);
+            return ExitCode::from(code);
+        }
         Command::Init => "init",
     };
     eprintln!("qf {name}: not implemented");

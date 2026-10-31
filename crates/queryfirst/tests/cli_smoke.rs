@@ -12,15 +12,13 @@ fn version_prints() {
 }
 
 #[test]
-fn subcommands_are_not_implemented() {
-    for sub in ["schema", "init"] {
-        Command::cargo_bin("qf")
-            .unwrap()
-            .arg(sub)
-            .assert()
-            .code(2)
-            .stderr(predicate::str::contains("not implemented"));
-    }
+fn init_is_not_implemented() {
+    Command::cargo_bin("qf")
+        .unwrap()
+        .arg("init")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("not implemented"));
 }
 
 #[test]

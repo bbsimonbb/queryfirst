@@ -7,7 +7,7 @@ mod io;
 mod manifest;
 mod model;
 
-pub use diff::{Difference, compare};
+pub use diff::{Difference, compare, fmt_type};
 pub use hash::sha256_tag;
 pub use io::{MetaError, from_json, meta_path_for, to_canonical_json};
 pub use manifest::{
