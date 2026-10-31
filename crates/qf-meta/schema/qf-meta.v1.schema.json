@@ -36,7 +36,7 @@
       "required": ["name", "dbIndex", "dbType", "required", "requiredReason", "transform", "locs"],
       "properties": {
         "name": { "type": "string", "description": "Parameter name as written after `:` in the query." },
-        "dbIndex": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "description": "1-based `$n` indexes this parameter maps to. Empty for pick/spread transforms (see transform keys)." },
+        "dbIndex": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "description": "1-based `$n` indexes this parameter maps to (scalar and spread). Empty for pick and pickSpread transforms, whose keys carry their own dbIndex." },
         "dbType": { "$ref": "#/$defs/typeRef" },
         "required": { "type": "boolean", "description": "Whether the parameter is non-nullable in generated code." },
         "requiredReason": { "enum": ["annotation", "inferred:insert-notnull", "inferred:where-eq-notnull", "default-nullable"], "description": "Why `required` has its value: explicit annotation, inferred from a NOT NULL insert target, inferred from an equality against a NOT NULL column in WHERE, or the nullable default." },

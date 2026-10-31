@@ -580,3 +580,93 @@ fn write_if_changed_only_writes_changes() {
     assert!(write_if_changed(&p, "z\n").unwrap());
     assert_eq!(std::fs::read(&p).unwrap(), b"z\n");
 }
+
+#[tokio::test]
+async fn unused_declared_param_qf004() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "q.psql",
+        "/* @name q\n   @param ids -> (...)\n   @param c -> (a!, b) */\nSELECT id, email FROM t WHERE id = :id",
+    );
+    let r = run(dir.path(), &Config::default(), &[]).await;
+    assert_eq!(r.exit_code(), 1);
+    let qf004: Vec<_> = r.diagnostics.iter().filter(|d| d.code == "QF004").collect();
+    assert_eq!(qf004.len(), 2, "{:?}", r.diagnostics);
+    assert_eq!((qf004[0].line, qf004[0].col), (2, 4));
+    assert_eq!(
+        qf004[0].message,
+        "@param ids is declared but never used in the query"
+    );
+    assert_eq!((qf004[1].line, qf004[1].col), (3, 4));
+    assert!(qf004[1].message.contains("@param c "));
+    assert!(!r.diagnostics.iter().any(|d| d.code == "QF014"));
+    let meta = from_json(&read(dir.path(), "q.qf.json")).unwrap();
+    assert!(matches!(meta.status, Status::Broken { .. }));
+    assert!(!meta.params.iter().any(|p| p.name == "ids" || p.name == "c"));
+}
+
+#[tokio::test]
+async fn hint_line_is_indented() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "q.psql", "SELECT 1 + anon FROM t");
+    let r = run(dir.path(), &Config::default(), &[]).await;
+    let human = queryfirst::report::render_human(&r);
+    assert!(
+        human.contains(
+            "q.psql:1:1: error[QF013]: result column 1 has no name\n  hint: give it an alias"
+        ),
+        "{human}"
+    );
+}
+
+#[tokio::test]
+async fn scoped_run_does_not_overwrite_sibling_meta() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "app/q.sql", "SELECT id FROM t");
+    assert_eq!(
+        run(root, &Config::default(), &[root.join("app/q.sql")])
+            .await
+            .exit_code(),
+        0
+    );
+    write(root, "app/q.psql", "SELECT id, email FROM t WHERE id = :id");
+    let before = snapshot(root);
+    let r = run(root, &Config::default(), &[root.join("app/q.psql")]).await;
+    assert_eq!(r.exit_code(), 2);
+    let d = r.diagnostics.iter().find(|d| d.code == "QF091").unwrap();
+    assert!(
+        d.message.contains("app/q.sql") && d.message.contains("app/q.psql"),
+        "{}",
+        d.message
+    );
+    assert_eq!(snapshot(root), before);
+
+    // Once the other source is gone (a rename), the meta is taken over, without its last-good.
+    std::fs::remove_file(root.join("app/q.sql")).unwrap();
+    write(root, "app/q.psql", "SELECT id FORM t");
+    let r = run(root, &Config::default(), &[root.join("app/q.psql")]).await;
+    assert_eq!(r.exit_code(), 1);
+    let meta = from_json(&read(root, "app/q.qf.json")).unwrap();
+    assert_eq!(meta.source, "app/q.psql");
+    assert!(meta.columns.is_empty());
+}
+
+#[tokio::test]
+async fn conflict_keeps_query_diagnostics() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "q.psql", "SELECT id FORM t");
+    write(dir.path(), "q.sql", "SELECT id FROM t");
+    let r = run(dir.path(), &Config::default(), &[]).await;
+    assert_eq!(r.exit_code(), 2);
+    assert!(r.diagnostics.iter().any(|d| d.code == "QF091"));
+    assert!(
+        r.diagnostics
+            .iter()
+            .any(|d| d.code == "QF010" && d.file.as_deref() == Some("q.psql")),
+        "{:?}",
+        r.diagnostics
+    );
+    assert!(r.written.is_empty());
+}

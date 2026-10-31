@@ -66,24 +66,23 @@ pub async fn generate_with<D: Describe>(
     report.summary.queries = files.len();
     match analyze_all(project, cfg, files, db, cat).await {
         Err(e) => report.push(connection_diagnostic(&e)),
-        Ok(mut analyzed) => match plan(project, cfg, &mut analyzed, whole_project) {
-            Err(d) => report.push(d),
-            Ok(p) => {
-                for a in &analyzed {
-                    let file = posix(&a.source);
-                    for d in &a.diagnostics {
-                        report.push(ReportedDiagnostic::new(Some(&file), d));
-                    }
-                }
-                match apply(project, &p) {
-                    Ok((written, deleted)) => {
-                        report.written = written;
-                        report.deleted = deleted;
-                    }
-                    Err(d) => report.push(d),
+        Ok(mut analyzed) => {
+            let planned = plan(project, cfg, &mut analyzed, whole_project);
+            // Query diagnostics are reported even when the plan fails.
+            for a in &analyzed {
+                let file = posix(&a.source);
+                for d in &a.diagnostics {
+                    report.push(ReportedDiagnostic::new(Some(&file), d));
                 }
             }
-        },
+            match planned.and_then(|p| apply(project, &p)) {
+                Ok((written, deleted)) => {
+                    report.written = written;
+                    report.deleted = deleted;
+                }
+                Err(d) => report.push(d),
+            }
+        }
     }
     report.finish();
     report

@@ -131,7 +131,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-/// `path:line:col: error[QFnnn]: message`, then `hint: …`, then a summary line.
+/// `path:line:col: error[QFnnn]: message`, then `  hint: …`, then a summary line.
 pub fn render_human(r: &Report) -> String {
     let mut out = String::new();
     for d in &r.diagnostics {
@@ -143,7 +143,7 @@ pub fn render_human(r: &Report) -> String {
         }
         out.push_str(&format!("{sev}[{}]: {}\n", d.code, d.message));
         if let Some(h) = &d.hint {
-            out.push_str(&format!("hint: {}\n", h.replace('\n', "\n      ")));
+            out.push_str(&format!("  hint: {}\n", h.replace('\n', "\n        ")));
         }
     }
     let s = &r.summary;

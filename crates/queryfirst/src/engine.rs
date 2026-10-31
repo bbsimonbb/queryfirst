@@ -231,6 +231,19 @@ pub async fn analyze_query<D: Describe>(
         source: lexed.statement.clone(),
         db: lexed.db_statement.clone(),
     };
+    for e in &q.expansions {
+        if !lexed.uses.iter().any(|u| u.name == e.param) {
+            diags.push(error(
+                "QF004",
+                param_decl_pos(src.normalised, &e.param),
+                format!("@param {} is declared but never used in the query", e.param),
+                Some(format!(
+                    "use :{} in the query, or remove the @param line",
+                    e.param
+                )),
+            ));
+        }
+    }
 
     let described = match db.describe(&lexed.db_statement).await {
         Ok(d) => d,
@@ -367,9 +380,11 @@ fn params(q: &QueryFile, lexed: &LexedQuery, described: &Described, cat: &Catalo
             .unwrap_or_else(unknown_type)
     };
 
+    // Declared but unused expansions are QF004 errors; they get no param.
     let mut order: Vec<(&str, Option<&ExpansionKind>)> = q
         .expansions
         .iter()
+        .filter(|e| lexed.uses.iter().any(|u| u.name == e.param))
         .map(|e| (e.param.as_str(), Some(&e.kind)))
         .collect();
     for u in &lexed.uses {
@@ -454,6 +469,23 @@ fn params(q: &QueryFile, lexed: &LexedQuery, described: &Described, cat: &Catalo
             }
         })
         .collect()
+}
+
+/// 1-based (line, col) of the `@param <name>` declaration in the source, else (1, 1).
+fn param_decl_pos(normalised: &str, name: &str) -> (u32, u32) {
+    for (i, line) in normalised.split('\n').enumerate() {
+        let mut from = 0;
+        while let Some(at) = line[from..].find("@param").map(|a| a + from) {
+            let rest = line[at + "@param".len()..].trim_start();
+            if let Some(after) = rest.strip_prefix(name)
+                && after.trim_start().starts_with("->")
+            {
+                return (i as u32 + 1, line[..at].chars().count() as u32 + 1);
+            }
+            from = at + "@param".len();
+        }
+    }
+    (1, 1)
 }
 
 /// 1-based column of `@type` on 1-based `line` of the source, else 1.
@@ -581,7 +613,8 @@ pub async fn analyze_file<D: Describe>(
     cat: &Catalog,
 ) -> Result<Analyzed, ConnError> {
     let source = posix(rel);
-    let previous = read_meta(&project.join(meta_path_for(rel)));
+    // A meta at this path written for another source (`q.sql` vs `q.psql`) is not ours.
+    let previous = read_meta(&project.join(meta_path_for(rel))).filter(|m| m.source == source);
     let unreadable = |message: String| {
         let d = error("QF001", (1, 1), message, None);
         broken_unparsed(&source, "", vec![d], previous.as_ref())
@@ -728,6 +761,19 @@ pub fn plan(
             } else {
                 outputs.push((path, content));
             }
+        }
+    }
+
+    // A meta on disk at one of our paths that belongs to another, still existing source: a
+    // scoped run would otherwise overwrite that query's meta and wrapper.
+    for a in analyzed.iter() {
+        let path = meta_rel(&a.source);
+        if let Some(other) = read_meta(&project.join(&path))
+            && other.source != a.meta.source
+            && safe_rel(&other.source)
+            && project.join(&other.source).is_file()
+        {
+            return Err(conflict(&path, &other.source, &a.meta.source));
         }
     }
 
