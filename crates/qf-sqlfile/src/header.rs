@@ -58,6 +58,18 @@ pub fn parse_query_file(path: &Path, normalised: &str) -> Result<QueryFile, Vec<
             header = Some(inner);
             body_start = inner.1 + 2;
         }
+    } else if src[start..].starts_with("/*")
+        && src[start..].lines().any(|l| {
+            TAGS.iter()
+                .any(|t| strip_line(l.trim_start_matches("/*")).0.starts_with(t))
+        })
+    {
+        cx.err(
+            "QF001",
+            start,
+            "Unterminated header comment".into(),
+            Some("Close the header with `*/`"),
+        );
     }
 
     let mut name: Option<String> = None;
@@ -89,7 +101,7 @@ pub fn parse_query_file(path: &Path, normalised: &str) -> Result<QueryFile, Vec<
             match *tag {
                 "@name" => {
                     if !is_ident(rest) {
-                        cx.err("QF004", at, format!("Invalid @name '{rest}'"), None);
+                        cx.err("QF001", at, format!("Invalid @name '{rest}'"), None);
                     } else if name.is_some() {
                         cx.err(
                             "QF002",
@@ -117,7 +129,7 @@ pub fn parse_query_file(path: &Path, normalised: &str) -> Result<QueryFile, Vec<
                 "@param" => match parse_param(rest) {
                     Some(e) => expansions.push(e),
                     None => cx.err(
-                        "QF004",
+                        "QF001",
                         at,
                         format!("Invalid @param annotation '{rest}'"),
                         Some("Expected `@param name -> (...)`, `(a, b!)` or `((a, b)...)`"),
@@ -128,7 +140,7 @@ pub fn parse_query_file(path: &Path, normalised: &str) -> Result<QueryFile, Vec<
                     match parse_type(rest, line) {
                         Some(t) => type_overrides.push(t),
                         None => cx.err(
-                            "QF004",
+                            "QF001",
                             at,
                             format!("Invalid @type annotation '{rest}'"),
                             Some("Expected `@type col -> Type from \"module\"`"),
@@ -333,8 +345,14 @@ fn check_single_statement(cx: &mut Ctx, body: &str, body_offset: usize) {
                 .get(1)
                 .map(|s| s.as_ptr() as usize - body.as_ptr() as usize)
                 .map(|o| o + (body[o..].len() - body[o..].trim_start().len())),
-            // Not parseable by Postgres (e.g. `:name` params): fall back to the scanner.
-            Err(_) => code_after,
+            // Not parseable by Postgres (e.g. `:name` params): use the lexer-based splitter.
+            Err(_) => match pg_query::split_with_scanner(body) {
+                Ok(stmts) => stmts
+                    .get(1)
+                    .map(|s| s.as_ptr() as usize - body.as_ptr() as usize)
+                    .map(|o| o + (body[o..].len() - body[o..].trim_start().len())),
+                Err(_) => code_after,
+            },
         };
     }
     if let Some(o) = at {

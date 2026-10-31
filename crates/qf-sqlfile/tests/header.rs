@@ -144,3 +144,31 @@ fn crlf_equivalent() {
     assert_eq!(ok("x.sql", lf), ok("x.sql", &crlf));
     assert_eq!(normalise("a\rb\r\nc"), "a\nb\nc");
 }
+
+#[test]
+fn syntax_errors_are_qf001() {
+    for src in [
+        "/* @name a b */\nSELECT 1",
+        "/* @name q\n @param ids -> nope */\nSELECT 1",
+        "/* @name q\n @type theme Themes */\nSELECT 1",
+    ] {
+        let e = parse("x.sql", src).unwrap_err();
+        assert_eq!(e[0].code, "QF001", "{src}");
+    }
+}
+
+#[test]
+fn unterminated_header() {
+    let e = parse("x.sql", "/* @name x\nSELECT 1").unwrap_err();
+    assert_eq!(e[0].code, "QF001");
+    assert_eq!((e[0].line, e[0].col), (1, 1));
+}
+
+#[test]
+fn dollar_quotes_with_params() {
+    let q = "/* @name q */\nDO $$ BEGIN PERFORM :p; PERFORM 2; END $$";
+    ok("q.sql", q);
+    ok("q.sql", "SELECT $t$ a;b $t$ WHERE x = :p;");
+    let e = parse("q.sql", "SELECT :a;\nSELECT :b").unwrap_err();
+    assert_eq!(e[0].code, "QF002");
+}
