@@ -19,10 +19,12 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The report entry for a connection or connection-configuration error.
 pub fn connection_diagnostic(e: &ConnError) -> ReportedDiagnostic {
-    let hint = (e.code == "QF090").then(|| {
-        "is the database running, and the SSH tunnel open if there is one? \
+    let hint = e.hint.clone().or_else(|| {
+        (e.code == "QF090").then(|| {
+            "is the database running, and the SSH tunnel open if there is one? \
          Agents: ask a human rather than retrying"
-            .to_string()
+                .to_string()
+        })
     });
     ReportedDiagnostic::project(e.code, e.to_string(), hint)
 }

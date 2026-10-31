@@ -72,6 +72,17 @@ fn standard_env_database_url_then_pg_vars() {
     assert_eq!(c.ssl_mode().as_str(), "disable");
     unsafe { std::env::remove_var("PGSSLMODE") };
 
+    // PGSSLROOTCERT applies when the connection string has no sslrootcert of its own.
+    unsafe { std::env::set_var("PGSSLROOTCERT", "/env/root.crt") };
+    let c = resolve_connection(&[ConnSource::StandardEnv]).unwrap();
+    assert_eq!(c.root_cert(), Some("/env/root.crt"));
+    let c = resolve_connection(&[ConnSource::Explicit(
+        "postgres://u@h:5432/db?sslrootcert=/url/root.crt".into(),
+    )])
+    .unwrap();
+    assert_eq!(c.root_cert(), Some("/url/root.crt"));
+    unsafe { std::env::remove_var("PGSSLROOTCERT") };
+
     unsafe { std::env::remove_var("DATABASE_URL") };
     let c = resolve_connection(&[ConnSource::StandardEnv]).unwrap();
     assert_eq!(c.display_target, "pghost:6543/pgdb");
@@ -160,7 +171,14 @@ fn invalid_connection_string_is_qf091_and_not_echoed() {
 
 #[test]
 fn sslmode_values() {
-    for mode in ["disable", "prefer", "require", "verify-ca", "verify-full"] {
+    for mode in [
+        "disable",
+        "prefer",
+        "require",
+        "no-verify",
+        "verify-ca",
+        "verify-full",
+    ] {
         let url = format!("postgres://u@h:5432/db?sslmode={mode}");
         let c = resolve_connection(&[ConnSource::Explicit(url)]).unwrap();
         assert_eq!(c.ssl_mode().as_str(), mode);
@@ -366,6 +384,137 @@ fn redact_connection_strings() {
         "nothing secret: password"
     );
     assert_eq!(redact("é postgres://x é"), "é postgres://*** é");
+    // Double-quoted values, as in a shell command or a JSON-ish log line.
+    assert_eq!(redact("password=\"a b\" dbname=x"), "password=*** dbname=x");
+    assert_eq!(
+        redact("PGPASSWORD = \"two \\\" words\" node db.js"),
+        "PGPASSWORD=*** node db.js"
+    );
+}
+
+fn fixture(name: &str) -> String {
+    // Forward slashes: a backslash is an escape in a key=value string.
+    format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR")).replace('\\', "/")
+}
+
+#[test]
+fn sslrootcert_in_url_and_key_value() {
+    let c = resolve_connection(&[ConnSource::Explicit(
+        "postgres://u@h:5432/db?sslmode=verify-full&sslrootcert=%2Fcerts%2Froot%20ca.crt".into(),
+    )])
+    .unwrap();
+    assert_eq!(c.ssl_mode().as_str(), "verify-full");
+    assert_eq!(c.root_cert(), Some("/certs/root ca.crt"));
+    assert_eq!(c.display_target, "h:5432/db");
+    let c = resolve_connection(&[ConnSource::Explicit(
+        "host=h dbname=db user=u sslrootcert='C:\\certs\\root ca.crt' sslmode=require".into(),
+    )])
+    .unwrap();
+    assert_eq!(c.ssl_mode().as_str(), "require");
+    assert_eq!(c.root_cert(), Some("C:certsroot ca.crt"));
+    let c = resolve_connection(&[ConnSource::Explicit(
+        "host=h dbname=db user=u sslrootcert=/a/b.crt sslmode=require".into(),
+    )])
+    .unwrap();
+    assert_eq!(c.root_cert(), Some("/a/b.crt"));
+}
+
+#[test]
+fn no_verify_is_require_without_verification() {
+    let c = resolve_connection(&[ConnSource::Explicit(
+        "postgres://u@h:5432/db?sslmode=no-verify".into(),
+    )])
+    .unwrap();
+    assert_eq!(c.ssl_mode().as_str(), "no-verify");
+    let c = resolve_connection(&[ConnSource::Explicit(
+        "host=h dbname=db user=u sslmode=no-verify".into(),
+    )])
+    .unwrap();
+    assert_eq!(c.ssl_mode(), qf_pg::SslMode::NoVerify);
+}
+
+#[test]
+fn unsupported_option_is_named_with_a_hint() {
+    for s in [
+        "postgres://u:pw@h:5432/db?sslcert=/c.crt&sslmode=require",
+        "host=h dbname=db user=u password=pw sslcert=/c.crt",
+    ] {
+        let e = resolve_connection(&[ConnSource::Explicit(s.into())]).unwrap_err();
+        assert_eq!(e.code, "QF091");
+        assert!(e.message.contains("`sslcert`"), "{e}");
+        let hint = e.hint.as_deref().unwrap_or_default();
+        assert!(hint.contains("remove `sslcert`"), "{hint}");
+        assert!(hint.contains("sslrootcert"), "{hint}");
+        assert!(!format!("{e} {e:?}").contains("pw@"), "{e:?}");
+    }
+    // Other parse errors still say what is wrong.
+    let e = resolve_connection(&[ConnSource::Explicit("postgres://u@h:notaport/db".into())])
+        .unwrap_err();
+    assert!(e.message.contains("invalid connection string"), "{e}");
+    assert!(
+        e.detail.as_deref().unwrap_or_default().contains("port"),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn at_sign_in_query_value_does_not_hide_sslmode() {
+    // No userinfo: the `@` is in a query value. sslmode before it must still be ours.
+    let c = resolve_connection(&[ConnSource::Explicit(
+        "postgres://h:5432/db?sslmode=require&application_name=me@work".into(),
+    )])
+    .unwrap();
+    assert_eq!(c.ssl_mode().as_str(), "require");
+    assert_eq!(c.display_target, "h:5432/db");
+    // With userinfo too.
+    let c = resolve_connection(&[ConnSource::Explicit(
+        "postgres://u:p@h:5432/db?sslmode=verify-full&application_name=a@b".into(),
+    )])
+    .unwrap();
+    assert_eq!(c.ssl_mode().as_str(), "verify-full");
+    assert_eq!(c.display_target, "h:5432/db");
+}
+
+#[tokio::test]
+async fn sslrootcert_is_loaded_for_verifying_modes() {
+    let good = fixture("root.crt");
+    // A good root file: TLS is set up, and the failure is reaching the (closed) port.
+    for mode in ["verify-full", "verify-ca", "require"] {
+        let c = resolve_connection(&[ConnSource::Explicit(format!(
+            "host=127.0.0.1 port=1 dbname=db user=u sslmode={mode} sslrootcert='{good}'"
+        ))])
+        .unwrap();
+        let e = connect_pool(&c, 1, Duration::from_secs(3))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "QF090", "{mode}: {e}");
+    }
+    // A missing or non-PEM file is a configuration error naming the file, before connecting.
+    let missing = fixture("no-such-root.crt");
+    let not_pem = fixture("schema.sql");
+    for (mode, path) in [("verify-full", &missing), ("require", &not_pem)] {
+        let c = resolve_connection(&[ConnSource::Explicit(format!(
+            "host=127.0.0.1 port=1 dbname=db user=u sslmode={mode} sslrootcert='{path}'"
+        ))])
+        .unwrap();
+        let e = connect_pool(&c, 1, Duration::from_secs(3))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "QF091", "{mode}: {e}");
+        assert!(e.message.contains("sslrootcert"), "{e}");
+        assert!(e.message.contains(path.as_str()), "{e}");
+    }
+    // Modes that never verify do not read it.
+    for mode in ["no-verify", "prefer", "disable"] {
+        let c = resolve_connection(&[ConnSource::Explicit(format!(
+            "host=127.0.0.1 port=1 dbname=db user=u sslmode={mode} sslrootcert='{missing}'"
+        ))])
+        .unwrap();
+        let e = connect_pool(&c, 1, Duration::from_secs(3))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "QF090", "{mode}: {e}");
+    }
 }
 
 #[test]

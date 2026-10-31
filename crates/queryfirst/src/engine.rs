@@ -184,6 +184,7 @@ pub(crate) fn connection_lost(source: &str, e: &PgQueryError) -> ConnError {
         code: "QF090",
         message: format!("lost the database connection while describing {source}"),
         detail: Some(detail),
+        hint: None,
     }
 }
 

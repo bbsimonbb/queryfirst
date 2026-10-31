@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -50,20 +51,28 @@ pub struct ConnError {
     pub message: String,
     /// The underlying cause, never containing a connection string.
     pub detail: Option<String>,
+    /// What to do about it, when there is something specific to say.
+    pub hint: Option<String>,
 }
 
 impl ConnError {
-    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         ConnError {
             code,
             message: message.into(),
             detail: None,
+            hint: None,
         }
     }
 
-    pub(crate) fn with_detail(mut self, detail: impl Into<String>) -> Self {
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         let d = detail.into();
         self.detail = (!d.trim().is_empty()).then(|| d.trim().to_string());
+        self
+    }
+
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
         self
     }
 
@@ -89,12 +98,16 @@ impl fmt::Display for ConnError {
 impl std::error::Error for ConnError {}
 
 /// libpq's `sslmode`. `verify-ca` and `verify-full` both verify the server certificate and host
-/// name against the Mozilla roots; the others encrypt without verifying, as libpq does.
+/// name, against the `sslrootcert` file when one is given, else the Mozilla roots. `require`
+/// verifies the same way when an `sslrootcert` is given (as libpq does when it has a root
+/// certificate), else encrypts without verifying. `no-verify` (node-postgres' convention, not
+/// libpq's) always encrypts without verifying, `sslrootcert` or not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SslMode {
     Disable,
     Prefer,
     Require,
+    NoVerify,
     VerifyCa,
     VerifyFull,
 }
@@ -105,6 +118,7 @@ impl SslMode {
             SslMode::Disable => "disable",
             SslMode::Prefer => "prefer",
             SslMode::Require => "require",
+            SslMode::NoVerify => "no-verify",
             SslMode::VerifyCa => "verify-ca",
             SslMode::VerifyFull => "verify-full",
         }
@@ -116,22 +130,33 @@ impl SslMode {
             // libpq's `allow` tries plaintext first; TLS-if-offered is the closest we have.
             "allow" | "prefer" => SslMode::Prefer,
             "require" => SslMode::Require,
+            "no-verify" => SslMode::NoVerify,
             "verify-ca" => SslMode::VerifyCa,
             "verify-full" => SslMode::VerifyFull,
             _ => return None,
         })
     }
 
-    fn verifies(self) -> bool {
-        matches!(self, SslMode::VerifyCa | SslMode::VerifyFull)
+    /// Whether the server certificate is verified, given whether an `sslrootcert` was set.
+    fn verifies(self, root_cert: bool) -> bool {
+        match self {
+            SslMode::VerifyCa | SslMode::VerifyFull => true,
+            SslMode::Require => root_cert,
+            SslMode::Disable | SslMode::Prefer | SslMode::NoVerify => false,
+        }
     }
 }
+
+/// libpq's `sslrootcert` value meaning "the system's trusted roots" (here, the Mozilla roots).
+const SYSTEM_ROOTS: &str = "system";
 
 /// A resolved connection configuration. `Display` and `Debug` never show the password.
 #[derive(Clone)]
 pub struct ResolvedConn {
     config: tokio_postgres::Config,
     ssl: SslMode,
+    /// `sslrootcert` (or `PGSSLROOTCERT`): a PEM file of trusted root certificates.
+    root_cert: Option<String>,
     host_port: String,
     /// `host:port/db`.
     pub display_target: String,
@@ -140,6 +165,11 @@ pub struct ResolvedConn {
 impl ResolvedConn {
     pub fn ssl_mode(&self) -> SslMode {
         self.ssl
+    }
+
+    /// The `sslrootcert` path (from the connection string, else `PGSSLROOTCERT`), if any.
+    pub fn root_cert(&self) -> Option<&str> {
+        self.root_cert.as_deref()
     }
 
     /// `host:port`, as used in `QF090` messages.
@@ -185,6 +215,7 @@ impl fmt::Debug for ResolvedConn {
                 &self.config.get_password().map(|_| "<redacted>"),
             )
             .field("sslmode", &self.ssl.as_str())
+            .field("sslrootcert", &self.root_cert)
             .finish()
     }
 }
@@ -268,8 +299,8 @@ fn run_helper(cmd: &str) -> Result<String, ConnError> {
 /// `text` with anything that looks like a connection secret masked: `postgres://` and
 /// `postgresql://` URLs (any case, up to whitespace or a quote) become `postgres://***`, and the
 /// value of any `password=` (any case, so `PGPASSWORD=` too; spaces around `=` allowed; value
-/// bare or single-quoted) becomes `***`. For text Queryfirst does not control, such as a
-/// helper command and its stderr, before it is shown.
+/// bare, single- or double-quoted) becomes `***`. For text Queryfirst does not control, such as
+/// a helper command and its stderr, before it is shown.
 pub fn redact(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let b = text.as_bytes();
@@ -301,9 +332,9 @@ pub fn redact(text: &str) -> String {
                 while j < b.len() && b[j] == b' ' {
                     j += 1;
                 }
-                if b.get(j) == Some(&b'\'') {
+                if let Some(&quote) = b.get(j).filter(|&&c| c == b'\'' || c == b'"') {
                     j += 1;
-                    while j < b.len() && b[j] != b'\'' {
+                    while j < b.len() && b[j] != quote {
                         j += if b[j] == b'\\' { 2 } else { 1 };
                     }
                     j = (j + 1).min(b.len());
@@ -342,34 +373,85 @@ fn shell(cmd: &str) -> Command {
 
 fn parse_sslmode(value: &str) -> Result<SslMode, ConnError> {
     SslMode::parse(value).ok_or_else(|| {
-        ConnError::config(format!("invalid sslmode `{value}`"))
-            .with_detail("expected disable, allow, prefer, require, verify-ca or verify-full")
+        ConnError::config(format!("invalid sslmode `{value}`")).with_detail(
+            "expected disable, allow, prefer, require, no-verify, verify-ca or verify-full",
+        )
     })
 }
 
-/// Take `sslmode` out of a URL or `key=value` connection string, returning the string without
-/// it (tokio-postgres only knows disable/prefer/require; the mode is applied after parsing).
-/// Only a real `sslmode` option counts: never text inside a password or another value.
-fn take_sslmode(s: &str) -> Result<(String, Option<SslMode>), ConnError> {
-    if s.starts_with("postgres://") || s.starts_with("postgresql://") {
-        take_sslmode_url(s)
-    } else {
-        take_sslmode_kv(s)
+/// The TLS options Queryfirst applies itself: tokio-postgres knows only disable, prefer and
+/// require, and has no `sslrootcert`.
+#[derive(Debug, Default)]
+struct TlsOptions {
+    mode: Option<SslMode>,
+    root_cert: Option<String>,
+}
+
+impl TlsOptions {
+    /// Record `key=value` if it is one of ours; `false` for any other option.
+    fn take(&mut self, key: &str, value: &str) -> Result<bool, ConnError> {
+        match key {
+            "sslmode" => self.mode = Some(parse_sslmode(value)?),
+            "sslrootcert" => self.root_cert = Some(value.to_string()),
+            _ => return Ok(false),
+        }
+        Ok(true)
     }
 }
 
-fn take_sslmode_url(s: &str) -> Result<(String, Option<SslMode>), ConnError> {
-    // The query starts at the first `?` after the userinfo (which ends at the last `@`).
-    let after_userinfo = s.rfind('@').map_or(0, |i| i + 1);
-    let Some(q) = s[after_userinfo..].find('?').map(|i| after_userinfo + i) else {
-        return Ok((s.to_string(), None));
+/// Take `sslmode` and `sslrootcert` out of a URL or `key=value` connection string, returning the
+/// string without them; they are applied after parsing. Only real options count: never text
+/// inside a password or another value.
+fn take_tls_options(s: &str) -> Result<(String, TlsOptions), ConnError> {
+    if s.starts_with("postgres://") || s.starts_with("postgresql://") {
+        take_tls_options_url(s)
+    } else {
+        take_tls_options_kv(s)
+    }
+}
+
+/// `s` with `%XX` escapes decoded (invalid escapes are kept as they are).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        if b[i] == b'%'
+            && let (Some(h), Some(l)) = (
+                b.get(i + 1).copied().and_then(hex),
+                b.get(i + 2).copied().and_then(hex),
+            )
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn take_tls_options_url(s: &str) -> Result<(String, TlsOptions), ConnError> {
+    // The authority (userinfo and hosts) runs from `://` to the first `/`, `?` or `#`; the query
+    // starts at the first `?` after it, so an `@` in a query value can never hide an option.
+    let authority = s.find("://").map_or(0, |i| i + 3);
+    let path = s[authority..]
+        .find(['/', '?', '#'])
+        .map_or(s.len(), |i| authority + i);
+    let mut opts = TlsOptions::default();
+    let Some(q) = s[path..].find('?').map(|i| path + i) else {
+        return Ok((s.to_string(), opts));
     };
-    let mut mode = None;
     let mut kept = Vec::new();
     for pair in s[q + 1..].split('&') {
         match pair.split_once('=') {
-            Some(("sslmode", v)) => mode = Some(parse_sslmode(v)?),
-            _ => kept.push(pair),
+            Some((k, v)) if opts.take(&percent_decode(k), &percent_decode(v))? => {}
+            // tokio-postgres reads the userinfo up to the first `@` anywhere in the URL: escape
+            // the ones in the query (it decodes them back).
+            Some(_) => kept.push(pair.replace('@', "%40")),
+            None => kept.push(pair.to_string()),
         }
     }
     let base = &s[..q];
@@ -378,12 +460,12 @@ fn take_sslmode_url(s: &str) -> Result<(String, Option<SslMode>), ConnError> {
     } else {
         format!("{base}?{}", kept.join("&"))
     };
-    Ok((rebuilt, mode))
+    Ok((rebuilt, opts))
 }
 
 /// libpq `key=value` form: whitespace-separated, spaces allowed around `=`, values optionally
 /// single-quoted, backslash escapes in both.
-fn take_sslmode_kv(s: &str) -> Result<(String, Option<SslMode>), ConnError> {
+fn take_tls_options_kv(s: &str) -> Result<(String, TlsOptions), ConnError> {
     let b: Vec<(usize, char)> = s.char_indices().collect();
     let at = |i: usize| b.get(i).map(|&(_, c)| c);
     let byte = |i: usize| b.get(i).map_or(s.len(), |&(o, _)| o);
@@ -393,7 +475,7 @@ fn take_sslmode_kv(s: &str) -> Result<(String, Option<SslMode>), ConnError> {
         }
         i
     };
-    let mut mode = None;
+    let mut opts = TlsOptions::default();
     let mut out = String::new();
     let mut i = 0;
     loop {
@@ -445,26 +527,44 @@ fn take_sslmode_kv(s: &str) -> Result<(String, Option<SslMode>), ConnError> {
                 }
             }
         }
-        if key == "sslmode" {
-            mode = Some(parse_sslmode(&value)?);
-        } else {
+        if !opts.take(key, &value)? {
             out.push_str(&s[byte(i)..byte(j)]);
         }
         i = j;
     }
-    Ok((out.trim().to_string(), mode))
+    Ok((out.trim().to_string(), opts))
+}
+
+/// The libpq options Queryfirst accepts (tokio-postgres' list, plus `sslrootcert`).
+const SUPPORTED_OPTIONS: &str = "host, hostaddr, port, user, password, dbname, options, \
+     application_name, connect_timeout, tcp_user_timeout, keepalives, keepalives_idle, \
+     keepalives_interval, keepalives_retries, target_session_attrs, channel_binding, \
+     load_balance_hosts, sslnegotiation, sslmode and sslrootcert";
+
+/// The error for a string tokio-postgres rejected. Its parse errors name the offending option,
+/// never its value.
+fn invalid_string(origin: &str, e: &tokio_postgres::Error) -> ConnError {
+    let cause = std::error::Error::source(e).map(|c| c.to_string());
+    if let Some(key) = cause
+        .as_deref()
+        .and_then(|c| c.strip_prefix("unknown option `"))
+        .and_then(|c| c.strip_suffix('`'))
+    {
+        return ConnError::config(format!("unsupported connection option `{key}` in {origin}"))
+            .with_hint(format!(
+                "remove `{key}` from the connection string; Queryfirst supports {SUPPORTED_OPTIONS}"
+            ));
+    }
+    ConnError::config(format!("invalid connection string from {origin}"))
+        .with_detail(cause.unwrap_or_else(|| e.to_string()))
 }
 
 fn parse_conn(s: &str, origin: &str) -> Result<ResolvedConn, ConnError> {
-    let (s, string_mode) = take_sslmode(s)?;
+    let (s, tls) = take_tls_options(s)?;
     let mut config = if s.is_empty() {
         tokio_postgres::Config::new()
     } else {
-        // tokio-postgres' parse errors name the offending option, never its value.
-        tokio_postgres::Config::from_str(&s).map_err(|e| {
-            ConnError::config(format!("invalid connection string from {origin}"))
-                .with_detail(e.to_string())
-        })?
+        tokio_postgres::Config::from_str(&s).map_err(|e| invalid_string(origin, &e))?
     };
 
     // Fill what the string left out from the libpq environment, as libpq does.
@@ -502,12 +602,19 @@ fn parse_conn(s: &str, origin: &str) -> Result<ResolvedConn, ConnError> {
         config.password(pw);
     }
 
-    let ssl = match string_mode {
+    let ssl = match tls.mode {
         Some(m) => m,
-        None => match env_nonempty("PGSSLMODE") {
-            Some(v) => SslMode::parse(v.trim())
-                .ok_or_else(|| ConnError::config(format!("invalid PGSSLMODE `{}`", v.trim())))?,
-            None => SslMode::Prefer,
+        // A mode tokio-postgres parsed itself (only if ours missed it) is still the string's,
+        // which beats the environment: never silently weaken it to `prefer`.
+        None => match config.get_ssl_mode() {
+            tokio_postgres::config::SslMode::Disable => SslMode::Disable,
+            tokio_postgres::config::SslMode::Require => SslMode::Require,
+            _ => match env_nonempty("PGSSLMODE") {
+                Some(v) => SslMode::parse(v.trim()).ok_or_else(|| {
+                    ConnError::config(format!("invalid PGSSLMODE `{}`", v.trim()))
+                })?,
+                None => SslMode::Prefer,
+            },
         },
     };
     config.ssl_mode(match ssl {
@@ -515,6 +622,7 @@ fn parse_conn(s: &str, origin: &str) -> Result<ResolvedConn, ConnError> {
         SslMode::Prefer => tokio_postgres::config::SslMode::Prefer,
         _ => tokio_postgres::config::SslMode::Require,
     });
+    let root_cert = tls.root_cert.or_else(|| env_nonempty("PGSSLROOTCERT"));
 
     let host = match &config.get_hosts()[0] {
         Host::Tcp(h) => h.clone(),
@@ -527,6 +635,7 @@ fn parse_conn(s: &str, origin: &str) -> Result<ResolvedConn, ConnError> {
     Ok(ResolvedConn {
         config,
         ssl,
+        root_cert,
         host_port,
         display_target,
     })
@@ -582,14 +691,40 @@ impl ServerCertVerifier for NoCertVerification {
     }
 }
 
-fn tls_connector(mode: SslMode) -> Result<MakeRustlsConnect, ConnError> {
+/// The trusted roots: the certificates of the PEM file `path`, or the Mozilla roots for none or
+/// `system`.
+fn root_store(path: Option<&str>) -> Result<RootCertStore, ConnError> {
+    let mut roots = RootCertStore::empty();
+    let path = match path {
+        None | Some(SYSTEM_ROOTS) => {
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            return Ok(roots);
+        }
+        Some(p) => p,
+    };
+    let fail = |why: String| {
+        ConnError::config(format!("cannot use sslrootcert {path}"))
+            .with_detail(why)
+            .with_hint("sslrootcert (or PGSSLROOTCERT) must name a PEM file of CA certificates")
+    };
+    let pem = std::fs::read(path).map_err(|e| fail(e.to_string()))?;
+    for cert in CertificateDer::pem_slice_iter(&pem) {
+        let cert = cert.map_err(|e| fail(e.to_string()))?;
+        roots.add(cert).map_err(|e| fail(e.to_string()))?;
+    }
+    if roots.is_empty() {
+        return Err(fail("no certificate found in the file".into()));
+    }
+    Ok(roots)
+}
+
+fn tls_connector(mode: SslMode, root_cert: Option<&str>) -> Result<MakeRustlsConnect, ConnError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
         .map_err(|e| ConnError::config("cannot set up TLS").with_detail(e.to_string()))?;
-    let config = if mode.verifies() {
-        let mut roots = RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = if mode.verifies(root_cert.is_some()) {
+        let roots = root_store(root_cert)?;
         builder.with_root_certificates(roots).with_no_client_auth()
     } else {
         builder
@@ -702,7 +837,7 @@ pub async fn connect_pool(
     timeout: Duration,
 ) -> Result<Pool, ConnError> {
     let size = size.max(1);
-    let tls = tls_connector(c.ssl)?;
+    let tls = tls_connector(c.ssl, c.root_cert.as_deref())?;
     let mut config = c.config.clone();
     config.connect_timeout(timeout);
     config.keepalives(true);

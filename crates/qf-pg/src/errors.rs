@@ -192,7 +192,8 @@ fn param_type_error(
             Some((param, key)) => (
                 format!("{what} key `{key}` of parameter :{param}"),
                 format!(
-                    "use :{param} where the type of `{key}` can be inferred,                      or cast it in the query, e.g. :{param}::text"
+                    "use :{param} where the type of `{key}` can be inferred, or cast it in the \
+                     query, e.g. :{param}::text"
                 ),
             ),
         },
@@ -202,10 +203,7 @@ fn param_type_error(
         ),
     };
     let hint = match server_hint {
-        Some(h) => format!(
-            "{h}
-{hint}"
-        ),
+        Some(h) => format!("{h}\n{hint}"),
         None => hint,
     };
     Diagnostic {
@@ -586,12 +584,28 @@ mod tests {
         assert_eq!(d.message, "could not infer a single type for parameter :p");
         assert_eq!(
             d.hint.as_deref(),
-            Some(
-                "text versus integer
-add a cast, e.g. :p::text"
-            )
+            Some("text versus integer\nadd a cast, e.g. :p::text")
         );
         assert_eq!((d.line, d.col), (1, 29));
+    }
+
+    #[test]
+    fn pick_key_hint_reads_as_one_sentence() {
+        let l = lex(
+            "/* @name q\n   @param c -> (email, name) */\nSELECT 1 FROM customers WHERE (email, name) = :c",
+        );
+        let d = to_diagnostic(&db("42P18", "paramètre $2", None, None), &l, &catalog());
+        assert_eq!(d.code, "QF011");
+        assert_eq!(
+            d.message,
+            "could not determine the type of key `name` of parameter :c"
+        );
+        let hint = d.hint.unwrap();
+        assert_eq!(
+            hint,
+            "use :c where the type of `name` can be inferred, or cast it in the query, e.g. :c::text"
+        );
+        assert!(!hint.contains("  "), "{hint:?}");
     }
 
     #[test]
