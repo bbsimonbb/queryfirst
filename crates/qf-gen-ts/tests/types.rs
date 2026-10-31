@@ -330,3 +330,48 @@ fn unsupported_type_qf014() {
     assert_eq!(e[0].code, "QF014");
     assert!(e[0].message.contains("geometry"));
 }
+
+#[test]
+fn array_override_renders_name_brackets() {
+    let mk = |nullable: bool| {
+        let mut c = col("v", tr("_text"), nullable);
+        c.type_override = Some(TypeOverride {
+            name: "VatCountries".into(),
+            module: Some("@/types/vat".into()),
+            array: true,
+        });
+        c
+    };
+    let m = meta(vec![], vec![mk(false)]);
+    let (out, a) = render(&m, &TsOptions::default());
+    assert!(out.contains("  v: VatCountries[];"), "{out}");
+    assert_eq!(
+        a.declarations(),
+        "import type { VatCountries } from '@/types/vat';\n"
+    );
+    let m = meta(vec![], vec![mk(true)]);
+    let (out, _) = render(&m, &TsOptions::default());
+    assert!(out.contains("  v: VatCountries[] | null;"), "{out}");
+}
+
+#[test]
+fn field_order_end_to_end() {
+    let names = ["id2", "Address", "address_line", "accountId", "_x", "id"];
+    let m = meta(
+        vec![],
+        names.iter().map(|n| col(n, tr("int4"), false)).collect(),
+    );
+    let (out, _) = render(&m, &TsOptions::default());
+    let order: Vec<&str> = out
+        .split("Result {\n")
+        .nth(1)
+        .unwrap()
+        .lines()
+        .take_while(|l| *l != "}")
+        .map(|l| l.trim().split(':').next().unwrap())
+        .collect();
+    assert_eq!(
+        order,
+        ["_x", "accountId", "Address", "address_line", "id", "id2"]
+    );
+}

@@ -294,12 +294,7 @@ impl TypeAllocator {
             }
             None => o.name.clone(),
         };
-        if o.array {
-            let arr = get_array(&local, None);
-            self.register(&arr)
-        } else {
-            local
-        }
+        if o.array { format!("{local}[]") } else { local }
     }
 
     fn type_of(
