@@ -89,17 +89,14 @@ fn generated_files_type_check() {
     described.description = Some("A described query.".into());
     described.source = "described.psql".into();
     for (file, m) in [
-        ("address.query.ts", &good),
-        ("one.query.ts", &one),
-        ("described.query.ts", &described),
+        ("address.qf.ts", &good),
+        ("one.qf.ts", &one),
+        ("described.qf.ts", &described),
     ] {
         let out = generate(m, None, &opts, &PgtypedBinding).unwrap();
         std::fs::write(dir.join(file), out.content).unwrap();
     }
-    let (ok, text) = tsc(
-        &dir,
-        &["address.query.ts", "one.query.ts", "described.query.ts"],
-    );
+    let (ok, text) = tsc(&dir, &["address.qf.ts", "one.qf.ts", "described.qf.ts"]);
     println!("tsc (fixtures): ok={ok}\n{text}");
     assert!(ok, "{text}");
 
@@ -118,13 +115,13 @@ fn generated_files_type_check() {
     b.params.clear();
     b.columns.clear();
     let out = generate(&b, Some(&good), &opts, &PgtypedBinding).unwrap();
-    std::fs::write(dir.join("broken.query.ts"), out.content).unwrap();
-    let (ok, text) = tsc(&dir, &["broken.query.ts"]);
+    std::fs::write(dir.join("broken.qf.ts"), out.content).unwrap();
+    let (ok, text) = tsc(&dir, &["broken.qf.ts"]);
     println!("tsc (broken): ok={ok}\n{text}");
     assert!(!ok, "{text}");
     let errors: Vec<&str> = text.lines().filter(|l| l.contains("error TS")).collect();
     assert_eq!(errors.len(), 1, "{text}");
-    assert!(errors[0].starts_with("broken.query.ts("), "{text}");
+    assert!(errors[0].starts_with("broken.qf.ts("), "{text}");
     assert!(errors[0].contains("syntax error at"), "{text}");
     assert!(errors[0].contains("addressBelongsToAccount"), "{text}");
 

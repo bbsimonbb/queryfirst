@@ -147,7 +147,7 @@ async fn generates_meta_and_wrapper() {
         r.written,
         vec![
             "app/[id]/(queries)/get-customer.qf.json",
-            "app/[id]/(queries)/get-customer.query.ts"
+            "app/[id]/(queries)/get-customer.qf.ts"
         ]
     );
     let meta = from_json(&read(root, "app/[id]/(queries)/get-customer.qf.json")).unwrap();
@@ -159,12 +159,12 @@ async fn generates_meta_and_wrapper() {
         meta.statement.db,
         "SELECT id, email FROM customers WHERE id = $1"
     );
-    let wrapper = read(root, "app/[id]/(queries)/get-customer.query.ts");
+    let wrapper = read(root, "app/[id]/(queries)/get-customer.qf.ts");
     assert!(wrapper.contains("export interface IGetCustomerResult"));
     assert_eq!(meta.generated.len(), 1);
     assert_eq!(
         meta.generated[0].path,
-        "app/[id]/(queries)/get-customer.query.ts"
+        "app/[id]/(queries)/get-customer.qf.ts"
     );
     assert_eq!(meta.generated[0].hash, sha256_tag(wrapper.as_bytes()));
     // The empty catalog means the analyzer gives up: a note, not an error.
@@ -282,7 +282,7 @@ async fn broken_query_three_channels() {
     assert_eq!(meta.columns, good_meta.columns);
     assert_ne!(meta.sql_hash, good_meta.sql_hash);
     // 3. Wrapper: previous types plus one deliberate error.
-    let wrapper = read(root, "app/get-customer.query.ts");
+    let wrapper = read(root, "app/get-customer.qf.ts");
     assert!(wrapper.contains("export interface IGetCustomerResult"));
     assert!(wrapper.contains("  email: string | null;"), "{wrapper}");
     assert!(wrapper.contains(
@@ -299,7 +299,7 @@ async fn broken_query_three_channels() {
         from_json(&read(root, "app/get-customer.qf.json")).unwrap(),
         good_meta
     );
-    assert!(!read(root, "app/get-customer.query.ts").contains("queryfirstError"));
+    assert!(!read(root, "app/get-customer.qf.ts").contains("queryfirstError"));
 }
 
 #[tokio::test]
@@ -309,7 +309,7 @@ async fn broken_without_previous_is_error_only() {
     write(root, "a.psql", "SELECT id FORM customers");
     let r = run(root, &Config::default(), &[]).await;
     assert_eq!(r.exit_code(), 1);
-    let wrapper = read(root, "a.query.ts");
+    let wrapper = read(root, "a.qf.ts");
     assert!(!wrapper.contains("interface"));
     assert!(wrapper.contains("export const queryfirstError: never = \"a: syntax error"));
     let meta = from_json(&read(root, "a.qf.json")).unwrap();
@@ -327,7 +327,7 @@ async fn broken_void_query_keeps_its_last_good_wrapper() {
     assert_eq!(run(root, &Config::default(), &[]).await.exit_code(), 0);
     let good_meta = from_json(&read(root, "delete-expired.qf.json")).unwrap();
     assert!(good_meta.params.is_empty() && good_meta.columns.is_empty());
-    let good_wrapper = read(root, "delete-expired.query.ts");
+    let good_wrapper = read(root, "delete-expired.qf.ts");
     assert!(good_wrapper.contains("export type IDeleteExpiredParams = void;"));
     assert!(good_wrapper.contains("export type IDeleteExpiredResult = void;"));
 
@@ -341,7 +341,7 @@ async fn broken_void_query_keeps_its_last_good_wrapper() {
     let meta = from_json(&read(root, "delete-expired.qf.json")).unwrap();
     assert!(matches!(meta.status, Status::Broken { .. }));
     assert_eq!(meta.statement, good_meta.statement);
-    let wrapper = read(root, "delete-expired.query.ts");
+    let wrapper = read(root, "delete-expired.qf.ts");
     let kept = wrapper
         .strip_suffix(
             "export const queryfirstError: never = \"deleteExpired: syntax error at or near \\\"FORM\\\"\";\n",
@@ -382,7 +382,7 @@ async fn parse_error_is_broken_query() {
     assert_eq!(d.line, 2);
     let meta = from_json(&read(root, "two.qf.json")).unwrap();
     assert!(matches!(meta.status, Status::Broken { .. }));
-    assert!(read(root, "two.query.ts").contains("queryfirstError"));
+    assert!(read(root, "two.qf.ts").contains("queryfirstError"));
 }
 
 #[tokio::test]
@@ -412,7 +412,7 @@ async fn orphan_cleanup_full_run_only() {
     let root = dir.path();
     write(root, "app/a.psql", GET);
     write(root, "app/b.psql", "SELECT id FROM customers");
-    write(root, "app/stray.query.ts", "// mine\n");
+    write(root, "app/stray.qf.ts", "// mine\n");
     write(root, "app/junk.qf.json", "not json\n");
     assert_eq!(run(root, &Config::default(), &[]).await.exit_code(), 0);
     std::fs::remove_file(root.join("app/b.psql")).unwrap();
@@ -421,14 +421,14 @@ async fn orphan_cleanup_full_run_only() {
     let r = run(root, &Config::default(), &[root.join("app/a.psql")]).await;
     assert!(r.deleted.is_empty());
     assert!(root.join("app/b.qf.json").exists());
-    assert!(root.join("app/b.query.ts").exists());
+    assert!(root.join("app/b.qf.ts").exists());
 
     let r = run(root, &Config::default(), &[]).await;
-    assert_eq!(r.deleted, vec!["app/b.qf.json", "app/b.query.ts"]);
+    assert_eq!(r.deleted, vec!["app/b.qf.json", "app/b.qf.ts"]);
     assert!(!root.join("app/b.qf.json").exists());
-    assert!(!root.join("app/b.query.ts").exists());
-    assert!(root.join("app/a.query.ts").exists());
-    assert!(root.join("app/stray.query.ts").exists());
+    assert!(!root.join("app/b.qf.ts").exists());
+    assert!(root.join("app/a.qf.ts").exists());
+    assert!(root.join("app/stray.qf.ts").exists());
     assert!(root.join("app/junk.qf.json").exists());
 }
 
@@ -452,7 +452,7 @@ async fn orphan_cleanup_ignores_unlisted_and_unsafe_paths() {
     write(root, "app/other.ts", "// not listed\n");
     std::fs::remove_file(root.join("app/b.psql")).unwrap();
     let r = run(root, &Config::default(), &[]).await;
-    assert_eq!(r.deleted, vec!["app/b.qf.json", "app/b.query.ts"]);
+    assert_eq!(r.deleted, vec!["app/b.qf.json", "app/b.qf.ts"]);
     assert!(root.join("app/other.ts").exists());
 }
 
@@ -467,7 +467,7 @@ async fn template_change_removes_previous_outputs() {
     )
     .unwrap();
     let r = run(root, &cfg, &[root.join("app/a.psql")]).await;
-    assert_eq!(r.deleted, vec!["app/a.query.ts"]);
+    assert_eq!(r.deleted, vec!["app/a.qf.ts"]);
     assert!(root.join("app/a.gen.ts").exists());
 }
 
@@ -546,7 +546,7 @@ async fn type_override_on_param_and_column() {
         (o.name.as_str(), o.module.as_deref(), o.array),
         ("CustomerId", Some("@/ids"), true)
     );
-    let wrapper = read(dir.path(), "q.query.ts");
+    let wrapper = read(dir.path(), "q.qf.ts");
     assert!(
         wrapper.contains("import type { Email } from '@/types';"),
         "{wrapper}"
@@ -737,13 +737,13 @@ async fn hand_written_file_at_output_path_is_not_overwritten() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     write(root, "app/foo.psql", GET);
-    write(root, "app/foo.query.ts", "export const mine = 1;\n");
+    write(root, "app/foo.qf.ts", "export const mine = 1;\n");
     let before = snapshot(root);
     let r = run(root, &Config::default(), &[]).await;
     assert_eq!(r.exit_code(), 2);
     let d = r.diagnostics.iter().find(|d| d.code == "QF091").unwrap();
     assert!(
-        d.message.contains("app/foo.query.ts") && d.message.contains("not generated"),
+        d.message.contains("app/foo.qf.ts") && d.message.contains("not generated"),
         "{}",
         d.message
     );
@@ -754,17 +754,17 @@ async fn hand_written_file_at_output_path_is_not_overwritten() {
     // A wrapper pgtyped generated (same header, no meta) is replaced, as in a migration.
     write(
         root,
-        "app/foo.query.ts",
+        "app/foo.qf.ts",
         "/** Types generated for queries found in \"app/foo.psql\" */\nexport const old = 1;\n",
     );
     let r = run(root, &Config::default(), &[]).await;
     assert_eq!(r.exit_code(), 0, "{:?}", r.diagnostics);
-    assert!(read(root, "app/foo.query.ts").contains("IGetCustomerResult"));
+    assert!(read(root, "app/foo.qf.ts").contains("IGetCustomerResult"));
     // Once recorded in the meta, later runs own it.
-    write(root, "app/foo.query.ts", "// edited by hand\n");
+    write(root, "app/foo.qf.ts", "// edited by hand\n");
     let r = run(root, &Config::default(), &[]).await;
     assert_eq!(r.exit_code(), 0, "{:?}", r.diagnostics);
-    assert!(read(root, "app/foo.query.ts").contains("IGetCustomerResult"));
+    assert!(read(root, "app/foo.qf.ts").contains("IGetCustomerResult"));
 }
 
 #[tokio::test]

@@ -54,7 +54,7 @@
         "required": ["name"],
         "properties": {
           "name": { "const": "typescript" },
-          "emitTemplate": { "type": "string", "default": "{{dir}}/{{name}}.query.ts", "description": "Output path; {{dir}} is the query file's project-relative directory, {{name}} its file name without extension." },
+          "emitTemplate": { "type": "string", "default": "{{dir}}/{{name}}.qf.ts", "description": "Output path; {{dir}} is the query file's project-relative directory, {{name}} its file name without extension." },
           "typesOverrides": {
             "type": "object",
             "description": "Postgres type name to TypeScript type, as in pgtyped: a type for both directions, or one per direction.",

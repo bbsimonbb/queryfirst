@@ -232,7 +232,7 @@ All three clear on the next good run. Wrappers are also deleted when their `.sql
 ## 11. TypeScript generator (phase 1: pgtyped drop-in)
 
 Output must be **equivalent to pgtyped's** for simplyfirst-app, so all ~800 call sites compile unchanged:
-- File: `{{dir}}/{{name}}.query.ts` (one query per file, so singular; template configurable, as in pgtyped's `emitTemplate`). This is the one deliberate break from pgtyped's file layout. Imports change from `…/x.queries` to `…/x.query`, which the migration codemod rewrites mechanically (§12).
+- File: `{{dir}}/{{name}}.qf.ts` (one query per file, so singular; template configurable, as in pgtyped's `emitTemplate`). This is the one deliberate break from pgtyped's file layout. Imports change from `…/x.queries` to `…/x.qf`, which the migration codemod rewrites mechanically (§12).
 - Same export names: `I<Name>Params`, `I<Name>Result`, `I<Name>Query`, `export const <name> = new PreparedQuery<…>(<name>IR)`.
 - Same helper types (`Json`, `DateOrString`, `stringArray`, `numberArray`, `NumberOrString`, `JsonArray`, Postgres enums as string unions such as `orderKind`), the same `void` result for statements that return nothing, and the same IR JSON shape (`usedParamSet`, `params[].locs`, `statement`) for `@pgtyped/runtime`.
 - Same parameter typing: nullable params as `?T | null | void`, required as `T`.
@@ -252,7 +252,7 @@ Output must be **equivalent to pgtyped's** for simplyfirst-app, so all ~800 call
 ## 12. Migration of simplyfirst-app
 
 1. `qf init --from-pgtyped`.
-2. Codemod: split the 26 multi-query `.psql` files into one file per query (file named after the kebab-cased `@name`). Rewrite every import of `…/x.queries` to `…/x.query` across the app (about 840 generated files are imported), then delete the old `.queries.ts` files once generation succeeds. This can be a `qf` subcommand or a one-off script (*builder's call*).
+2. Codemod: split the 26 multi-query `.psql` files into one file per query (file named after the kebab-cased `@name`). Rewrite every import of `…/x.queries` to `…/x.qf` across the app (about 840 generated files are imported), then delete the old `.queries.ts` files once generation succeeds. This can be a `qf` subcommand or a one-off script (*builder's call*).
 3. `qf generate`, review the diff report, fix the bugs it reveals.
 4. Remove pgtyped from the build.
 5. Later, incrementally: add `@type` and `@returns`, then delete the hand-corrected `I*Corrected` interfaces (165 files) and the `as` casts (215) they make redundant. Agents can do this query by query.
@@ -313,7 +313,7 @@ Context: simplyfirst's API routes are thin. Query results go over the wire uncha
 - Nullable unless proven otherwise; overrides for the rest.
 - Portability decides the language → Rust. No Octopus.
 - Schema inspection included. Index inspection bookmarked.
-- Drop-in replacement for pgtyped output, or machine-convertible. Generated files are named `.query.ts` (singular, one query per file); imports are rewritten by codemod.
+- Drop-in replacement for pgtyped output, or machine-convertible. Generated files are named `.qf.ts` (one query per file); wrappers are `<name>.qf.ts`, meta `<name>.qf.json`: recognisable by extension, one family. Imports are rewritten by codemod.
 - Parameters default to nullable; the author decides; required is inferred only where reliable.
 - Adopt pgtyped's annotation syntax; add `@type` (including JSON app types) and `@returns`; `@name` optional.
 - Conversion (wire/rich types) comes after the drop-in and is designed as described in §13; never sniff top-level columns; epoq for `date`; all timestamps UTC.
@@ -333,7 +333,7 @@ Context: simplyfirst's API routes are thin. Query results go over the wire uncha
 - Binary `qf`, npm package `queryfirst`, config file `queryfirst.json`.
 - `:p?` added as an explicit nullable override.
 - `@returns` semantics (§6.4) and keeping `@pgtyped/runtime` in phase 1.
-- Hand-edit detection uses hashes stored in the meta file, so the generated `.query.ts` stays close to pgtyped's.
+- Hand-edit detection uses hashes stored in the meta file, so the generated `.qf.ts` stays close to pgtyped's.
 - `qf test` connection resolution: `--db`, then an env var, then a connection-helper command (§9a). Plus `qf bundle` / `--manifest` for deployment, and the offline `qf check` for CI.
 - Agents run `qf` against the dev DB through the tunnel, and ask a human if it is unreachable.
 - The TypeScript generator separates type generation from the runtime binding, ready for SQL Server.

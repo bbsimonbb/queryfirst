@@ -2,6 +2,8 @@
 
 Date: 2026-10-31. Spec: §11 (phase 1 acceptance) and §12 (migration).
 
+> Note: after this acceptance the generated wrappers were renamed from `<name>.query.ts` to `<name>.qf.ts` (imports `…/x.qf`), so they share the `.qf` family with the meta file. Names below are as they were at acceptance.
+
 The migration was done in a worktree of simplyfirst-app, branch `queryfirst-migration`
 (from `main` at `bf1df9cdb`), and left there for review: nothing merged or pushed.
 

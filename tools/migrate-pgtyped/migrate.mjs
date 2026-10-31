@@ -2,7 +2,7 @@
 // Queryfirst pgtyped migration codemod.
 //   node migrate.mjs <project> [--dry-run]
 // Splits multi-query .psql/.sql files (one query per file, kebab-cased @name) and
-// rewrites TypeScript imports from "x.queries" to "x.query". No dependencies.
+// rewrites TypeScript imports from "x.queries" to "x.qf". No dependencies.
 import { readdirSync, readFileSync, writeFileSync, existsSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve, dirname, basename, extname, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -122,7 +122,7 @@ const SRC_RE = new RegExp(
   "g",
 );
 
-const toQuerySpec = (spec) => spec.replace(/\.queries(?=(?:\.(?:ts|js))?$)/, ".query");
+const toQuerySpec = (spec) => spec.replace(/\.queries(?=(?:\.(?:ts|js))?$)/, ".qf");
 
 /** Index of the `)` closing a call whose arguments start at `from`, or -1. Skips strings and comments. */
 function findCallEnd(text, from) {
@@ -163,7 +163,7 @@ function rewriteSource(text, file, splitMap, aliases) {
   };
   const targetSpec = (spec, qn) => {
     const ext = (spec.match(/\.queries(\.(?:ts|js))?$/) ?? [])[1] ?? "";
-    return `${spec.slice(0, spec.lastIndexOf("/") + 1)}${kebab(qn)}.query${ext}`;
+    return `${spec.slice(0, spec.lastIndexOf("/") + 1)}${kebab(qn)}.qf${ext}`;
   };
   let out = "";
   let last = 0;

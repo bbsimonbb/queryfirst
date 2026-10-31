@@ -18,7 +18,7 @@ Until then, build it (below) and run `target/release/qf`.
 
 ```
 qf init                 # writes queryfirst.json (qf init --from-pgtyped converts a pgtyped config)
-qf generate             # describe every query against the dev database; write .qf.json + .query.ts
+qf generate             # describe every query against the dev database; write .qf.json + .qf.ts
 qf check                # offline: are the generated files up to date? (CI)
 ```
 
@@ -27,7 +27,7 @@ For each query file `get-invoice.psql`, `qf generate` writes, next to it:
 - `get-invoice.qf.json`, the meta file: parameters and result columns with their Postgres types,
   nullability (with the reason), required flags, annotations and diagnostics. This is what
   other tools and agents read.
-- `get-invoice.query.ts`, the TypeScript wrapper: `IGetInvoiceParams`, `IGetInvoiceResult`,
+- `get-invoice.qf.ts`, the TypeScript wrapper: `IGetInvoiceParams`, `IGetInvoiceResult`,
   `IGetInvoiceQuery` and `export const getInvoice = new PreparedQuery<…>(…)`, as pgtyped writes
   them.
 
@@ -35,7 +35,7 @@ Commit both. Files are written with LF line endings and only when their content 
 second run writes nothing. On Windows with `core.autocrlf=true`, add a `.gitattributes`:
 
 ```
-*.query.ts text eol=lf
+*.qf.ts text eol=lf
 *.qf.json text eol=lf
 ```
 
@@ -197,7 +197,7 @@ app pool URL and a direct session for describes) should name the variable it wan
   "generators": [
     {
       "name": "typescript",
-      "emitTemplate": "{{dir}}/{{name}}.query.ts",
+      "emitTemplate": "{{dir}}/{{name}}.qf.ts",
       "typesOverrides": { "numeric": "number" },
       "camelCaseColumnNames": false
     }
@@ -213,7 +213,7 @@ app pool URL and a direct session for describes) should name the variable it wan
 | `connection.env` | — | Environment variable holding the dev connection string (then `DATABASE_URL` is not used; a service, the `PG*` variables and `.pgpass` still fill what it leaves out, e.g. the password). |
 | `pool` | `8` | Connections; describes run in parallel up to this many. |
 | `generators` | one TypeScript generator | An empty list writes meta files only. |
-| `generators[].emitTemplate` | `"{{dir}}/{{name}}.query.ts"` | Output path; `{{dir}}` is the query's directory, `{{name}}` its file name without extension. |
+| `generators[].emitTemplate` | `"{{dir}}/{{name}}.qf.ts"` | Output path; `{{dir}}` is the query's directory, `{{name}}` its file name without extension. |
 | `generators[].typesOverrides` | — | Postgres type → TypeScript type, as in pgtyped (one type, or `{ "parameter": …, "return": … }`). |
 | `generators[].camelCaseColumnNames` | `false` | Camel-case result column names. |
 | `test.connection.env` / `.command` | — | Where `qf test` finds the target database. |
@@ -267,7 +267,7 @@ ORDER BY I."createdAt" desc
 1. `qf init --from-pgtyped` converts `pgtyped-config.json` or `.pgtyped.ts` (the `db` section is
    dropped: the connection comes from the environment, as before).
 2. `node tools/migrate-pgtyped/migrate.mjs <project> --dry-run`, then without `--dry-run`: splits
-   multi-query files into one file per query and rewrites imports of `x.queries` to `x.query`
+   multi-query files into one file per query and rewrites imports of `x.queries` to `x.qf`
    (see [tools/migrate-pgtyped/README.md](tools/migrate-pgtyped/README.md)).
 3. `qf generate`, compare with the old `.queries.ts`, delete them, run `tsc`. New compile errors
    are expected: where a column became nullable or a parameter required, the caller was either

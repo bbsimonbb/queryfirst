@@ -9,7 +9,7 @@ const SIMPLYFIRST: &str = r#"{
   "generators": [
     {
       "name": "typescript",
-      "emitTemplate": "{{dir}}/{{name}}.query.ts",
+      "emitTemplate": "{{dir}}/{{name}}.qf.ts",
       "typesOverrides": {
         "numeric": "number"
       }
@@ -48,7 +48,7 @@ fn default_init() {
     assert!(err.contains("Queryfirst init"));
     assert!(
         err.contains(".gitattributes")
-            && err.contains("*.query.ts text eol=lf")
+            && err.contains("*.qf.ts text eol=lf")
             && err.contains("*.qf.json text eol=lf"),
         "{err}"
     );

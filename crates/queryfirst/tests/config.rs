@@ -20,7 +20,7 @@ fn defaults_without_file() {
     assert_eq!(cfg.generators.len(), 1);
     let g = &cfg.generators[0];
     assert_eq!(g.name, "typescript");
-    assert_eq!(g.emit_template, "{{dir}}/{{name}}.query.ts");
+    assert_eq!(g.emit_template, "{{dir}}/{{name}}.qf.ts");
     assert!(g.types_overrides.is_empty());
     assert!(!g.camel_case_column_names);
 }
@@ -45,7 +45,7 @@ fn generator_defaults_inside_entry() {
         r#"{ "generators": [ { "name": "typescript", "camelCaseColumnNames": true } ] }"#,
     )
     .unwrap();
-    assert_eq!(cfg.generators[0].emit_template, "{{dir}}/{{name}}.query.ts");
+    assert_eq!(cfg.generators[0].emit_template, "{{dir}}/{{name}}.qf.ts");
     assert!(cfg.generators[0].camel_case_column_names);
 }
 
@@ -131,7 +131,7 @@ fn types_overrides_accepts_both_pgtyped_shapes() {
     );
     let ts = cfg.generators[0].ts_options();
     assert_eq!(ts.types_overrides, *o);
-    assert_eq!(ts.emit_template, "{{dir}}/{{name}}.query.ts");
+    assert_eq!(ts.emit_template, "{{dir}}/{{name}}.qf.ts");
 }
 
 #[test]

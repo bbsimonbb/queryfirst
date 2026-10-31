@@ -9,10 +9,10 @@ to each command, as simplyfirst-app does (`npm run qf -- <file>`, `npm run qf:db
 
 SQL queries live in `.psql` / `.sql` files, one query per file; the file name gives the query its
 name (`get-invoice.psql` exports `getInvoice`). Queryfirst (`qf`) describes each query against
-the dev database, without ever running it, and writes two files next to it: `<name>.query.ts`
+the dev database, without ever running it, and writes two files next to it: `<name>.qf.ts`
 (the TypeScript wrapper) and `<name>.qf.json` (the meta file).
 
-- Don't read generated `*.query.ts`; read the `.qf.json`. It lists the parameters and result
+- Don't read generated `*.qf.ts`; read the `.qf.json`. It lists the parameters and result
   columns with their types, nullability and required flags, and any diagnostics.
 - After editing a `.psql`, run `qf generate <file>`. Never edit generated files by hand.
 - If the database is unreachable (`QF090`), ask a human. Don't retry in a loop, and don't

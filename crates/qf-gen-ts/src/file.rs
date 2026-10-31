@@ -12,7 +12,7 @@ pub struct OutputFile {
     pub content: String,
 }
 
-const DEFAULT_TEMPLATE: &str = "{{dir}}/{{name}}.query.ts";
+const DEFAULT_TEMPLATE: &str = "{{dir}}/{{name}}.qf.ts";
 
 /// Expand `emit_template` (`{{dir}}`, `{{name}}`) for a project-relative POSIX source path.
 pub fn output_path(source: &str, opts: &TsOptions) -> String {
@@ -126,7 +126,7 @@ fn render_file(
     Ok(out)
 }
 
-/// Generate the `.query.ts` for `meta`. A broken query keeps the types of `last_good` (else its
+/// Generate the `.qf.ts` for `meta`. A broken query keeps the types of `last_good` (else its
 /// own last good types, which it has when it has a statement) and gets a trailing
 /// `queryfirstError: never` so that `tsc` fails.
 pub fn generate(

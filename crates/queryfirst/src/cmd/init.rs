@@ -25,7 +25,7 @@ const NOTE_CODE: &str = "QF092";
 /// `core.autocrlf=true` checkout does not turn the generated files CRLF.
 const GITATTRIBUTES_NOTE: [&str; 3] = [
     "note: generated files are written with LF line endings; to keep them LF on checkout, add to .gitattributes:",
-    "  *.query.ts text eol=lf",
+    "  *.qf.ts text eol=lf",
     "  *.qf.json text eol=lf",
 ];
 
@@ -219,7 +219,7 @@ fn convert_pgtyped(project: &Path, report: &mut Report) -> Result<OutConfig, Str
         Some(include)
     };
 
-    // emitTemplate: .queries.ts -> .query.ts
+    // emitTemplate: .queries.ts -> .qf.ts
     let emit_template = match templates.first() {
         Some(first) => {
             if templates.iter().any(|t| t != first) {
@@ -229,7 +229,7 @@ fn convert_pgtyped(project: &Path, report: &mut Report) -> Result<OutConfig, Str
                 ));
             }
             match first.strip_suffix(".queries.ts") {
-                Some(stem) => format!("{stem}.query.ts"),
+                Some(stem) => format!("{stem}.qf.ts"),
                 None => first.clone(),
             }
         }

@@ -2,7 +2,7 @@ use qf_gen_ts::{PgtypedBinding, TsOptions, generate, meta_ir, output_path};
 use qf_meta::*;
 use std::path::{Path, PathBuf};
 
-const GOLDEN: &str = include_str!("fixtures/address.query.ts");
+const GOLDEN: &str = include_str!("fixtures/address.qf.ts");
 
 fn address_meta() -> QueryMeta {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../qf-meta/tests/fixtures/address.qf.json");
@@ -46,7 +46,7 @@ fn tr() -> TypeRef {
 #[test]
 fn address_file_exact() {
     let out = generate(&address_meta(), None, &opts(), &PgtypedBinding).unwrap();
-    assert_eq!(out.path, "app/api/(shared-queries)/address.query.ts");
+    assert_eq!(out.path, "app/api/(shared-queries)/address.qf.ts");
     assert_eq!(out.content, GOLDEN);
     assert!(!out.content.contains('\r'));
     // The golden is the real pgtyped file, CRLF -> LF.
@@ -262,9 +262,9 @@ fn output_path_template_brackets() {
     let mut o = opts();
     assert_eq!(
         output_path("app/orders/[id]/(queries)/get.psql", &o),
-        "app/orders/[id]/(queries)/get.query.ts"
+        "app/orders/[id]/(queries)/get.qf.ts"
     );
-    assert_eq!(output_path("get.psql", &o), "get.query.ts");
+    assert_eq!(output_path("get.psql", &o), "get.qf.ts");
     o.emit_template = "{{dir}}/{{name}}.queries.ts".into();
     assert_eq!(output_path("a/b/get.psql", &o), "a/b/get.queries.ts");
 }

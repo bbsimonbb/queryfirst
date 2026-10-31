@@ -68,15 +68,15 @@ test("splits multi-query file and rewrites imports (LF)", () => {
   assert.ok("src/q/single.psql" in t);
   assert.ok("ops/index.psql" in t, "unmanaged multi-query file must survive");
   assert.equal(t["src/a.ts"],
-    'import { getUser, IGetUserResult } from "./q/get-user.query";\n' +
-    'import { single } from "./q/single.query";\n');
+    'import { getUser, IGetUserResult } from "./q/get-user.qf";\n' +
+    'import { single } from "./q/single.qf";\n');
   assert.equal(t["src/b.ts"],
-    "import type {\n  IListUsersParams as P,\n} from '@/src/q/list-users.query'\n" +
-    "import type {\n  IDeleteUserQuery,\n} from '@/src/q/delete-user.query'\n" +
-    "import type {\n  IGetUserParams,\n} from '@/src/q/get-user.query'\n" +
-    'export { listUsers } from "./q/list-users.query";\n' +
-    'import { single as s } from "./q/single.query.ts";\n' +
-    'vi.mock("./q/single.query", () => ({}));\n' +
+    "import type {\n  IListUsersParams as P,\n} from '@/src/q/list-users.qf'\n" +
+    "import type {\n  IDeleteUserQuery,\n} from '@/src/q/delete-user.qf'\n" +
+    "import type {\n  IGetUserParams,\n} from '@/src/q/get-user.qf'\n" +
+    'export { listUsers } from "./q/list-users.qf";\n' +
+    'import { single as s } from "./q/single.qf.ts";\n' +
+    'vi.mock("./q/single.qf", () => ({}));\n' +
     'vi.mock("./q/user.queries", () => ({}));\n');
   assert.equal(readFileSync(join(root, "node_modules/x/c.ts"), "utf8"), 'import { a } from "./z.queries";\n');
   assert.ok(t["src/q/user.queries.ts"]);
@@ -89,9 +89,9 @@ test("one import pulling from several split queries becomes several lines (singl
   assert.equal(run(root).status, 0);
   const t = tree(root);
   assert.equal(t["src/c.ts"],
-    'import { getUser } from "./q/get-user.query";\r\n' +
-    'import { listUsers as l } from "./q/list-users.query";\r\n' +
-    'import { type IDeleteUserResult } from "./q/delete-user.query";\r\nconst x = 1;\r\n');
+    'import { getUser } from "./q/get-user.qf";\r\n' +
+    'import { listUsers as l } from "./q/list-users.qf";\r\n' +
+    'import { type IDeleteUserResult } from "./q/delete-user.qf";\r\nconst x = 1;\r\n');
   assert.ok(t["src/q/get-user.psql"].includes("\r\n"));
   assert.ok(!/[^\r]\n/.test(t["src/q/get-user.psql"]));
 });
@@ -179,11 +179,11 @@ test("shared helper types follow the first query group, in any position; default
   const r = run(root);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(readFileSync(join(root, "src/s1.ts"), "utf8"),
-    'import { Json, DateOrString, listUsers } from "./q/list-users.query";\n' +
-    'import { getUser } from "./q/get-user.query";\n' +
-    'import type { Json as J } from "./q/get-user.query";\n' +
-    'import Def, { IListUsersResult, Json as K } from "./q/list-users.query";\n' +
-    'import { listUsers as l2, DateOrString as D } from "./q/list-users.query";\n' +
+    'import { Json, DateOrString, listUsers } from "./q/list-users.qf";\n' +
+    'import { getUser } from "./q/get-user.qf";\n' +
+    'import type { Json as J } from "./q/get-user.qf";\n' +
+    'import Def, { IListUsersResult, Json as K } from "./q/list-users.qf";\n' +
+    'import { listUsers as l2, DateOrString as D } from "./q/list-users.qf";\n' +
     'import { Nope, getUser as g } from "./q/user.queries";\n');
   assert.match(r.stdout, /Nope/);
 });
@@ -193,8 +193,8 @@ test("shared type listed after the query symbol of a later group", () => {
   put(root, "src/s2.ts", 'import { deleteUser, getUser, Json } from "./q/user.queries";\n');
   assert.equal(run(root).status, 0);
   assert.equal(readFileSync(join(root, "src/s2.ts"), "utf8"),
-    'import { deleteUser, Json } from "./q/delete-user.query";\n' +
-    'import { getUser } from "./q/get-user.query";\n');
+    'import { deleteUser, Json } from "./q/delete-user.qf";\n' +
+    'import { getUser } from "./q/get-user.qf";\n');
 });
 
 test("shared helper types go to a query whose generated block uses them (found in simplyfirst acceptance)", () => {
@@ -230,11 +230,11 @@ test("shared helper types go to a query whose generated block uses them (found i
   const r = run(root);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(readFileSync(join(root, "src/s3.ts"), "utf8"), [
-    'import { getUser } from "./q/get-user.query";',
-    'import { Json, listUsers } from "./q/list-users.query";',
-    'import { getUser as g } from "./q/get-user.query";',
-    'import { DateOrString } from "./q/delete-user.query";',
-    'import type { Json as J } from "./q/list-users.query";',
+    'import { getUser } from "./q/get-user.qf";',
+    'import { Json, listUsers } from "./q/list-users.qf";',
+    'import { getUser as g } from "./q/get-user.qf";',
+    'import { DateOrString } from "./q/delete-user.qf";',
+    'import type { Json as J } from "./q/list-users.qf";',
     "",
   ].join("\n"));
 });
@@ -249,11 +249,11 @@ test("vi.mock of a split module becomes one mock per target module", () => {
   const r = run(root);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(readFileSync(join(root, "src/m.test.ts"), "utf8"),
-    'vi.mock("./q/get-user.query", () => ({\r\n  getUser: { run: m.a },\r\n  deleteUser: { run: m.getUser },\r\n}))\r\n' +
-    'vi.mock("./q/delete-user.query", () => ({\r\n  getUser: { run: m.a },\r\n  deleteUser: { run: m.getUser },\r\n}))\r\n' +
-    'vi.mock("./q/get-user.query")\r\nvi.mock("./q/list-users.query")\r\nvi.mock("./q/delete-user.query")\r\n' +
+    'vi.mock("./q/get-user.qf", () => ({\r\n  getUser: { run: m.a },\r\n  deleteUser: { run: m.getUser },\r\n}))\r\n' +
+    'vi.mock("./q/delete-user.qf", () => ({\r\n  getUser: { run: m.a },\r\n  deleteUser: { run: m.getUser },\r\n}))\r\n' +
+    'vi.mock("./q/get-user.qf")\r\nvi.mock("./q/list-users.qf")\r\nvi.mock("./q/delete-user.qf")\r\n' +
     'vi.mock("./q/user.queries", () => ({ unknownThing: 1 }))\r\n' +
-    'vi.mock("./q/single.query", () => ({ single: 1 }))\r\n');
+    'vi.mock("./q/single.qf", () => ({ single: 1 }))\r\n');
   assert.match(r.stdout, /MANUAL REVIEW src\/m\.test\.ts/);
 });
 

@@ -10,7 +10,7 @@ use qf_sqlfile::{Diagnostic, Severity};
 use serde::Deserialize;
 
 pub const CONFIG_FILE: &str = "queryfirst.json";
-pub const DEFAULT_EMIT_TEMPLATE: &str = "{{dir}}/{{name}}.query.ts";
+pub const DEFAULT_EMIT_TEMPLATE: &str = "{{dir}}/{{name}}.qf.ts";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {

@@ -912,7 +912,7 @@ pub fn plan(
     }
 
     // An existing file at an output path that no meta recorded is someone else's (e.g. a
-    // hand-written `foo.query.ts`): never overwrite it. A wrapper pgtyped (or Queryfirst, with
+    // hand-written `foo.qf.ts`): never overwrite it. A wrapper pgtyped (or Queryfirst, with
     // its meta lost) generated starts with the shared header, and is ours to replace.
     for a in analyzed.iter() {
         let on_disk = read_meta(&project.join(meta_rel(&a.source)));

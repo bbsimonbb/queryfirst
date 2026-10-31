@@ -203,7 +203,7 @@ fn generates_meta_and_wrapper() {
     );
     assert_eq!(meta.columns[1].db_type.modifier.as_deref(), Some("(30)"));
     assert!(meta.params[0].required, "{:?}", meta.params[0]);
-    let wrapper = read(root, "app/[id]/(queries)/get-customer.query.ts");
+    let wrapper = read(root, "app/[id]/(queries)/get-customer.qf.ts");
     assert!(wrapper.contains("  id: number;\n"), "{wrapper}");
     assert!(wrapper.contains("  city: string | null;\n"), "{wrapper}");
     assert_eq!(meta.generated[0].hash, sha256_tag(wrapper.as_bytes()));
@@ -271,7 +271,7 @@ fn broken_query_three_channels() {
     write(root, rel, good);
     assert_eq!(generate(root, &db.url, &[]).code, 0);
     let good_meta = read(root, "app/get-invoice.qf.json");
-    let good_wrapper = read(root, "app/get-invoice.query.ts");
+    let good_wrapper = read(root, "app/get-invoice.qf.ts");
 
     write(
         root,
@@ -295,7 +295,7 @@ fn broken_query_three_channels() {
     assert_eq!(meta.params, old.params);
     assert_eq!(meta.columns, old.columns);
     // 3. Wrapper: previous types plus the error.
-    let wrapper = read(root, "app/get-invoice.query.ts");
+    let wrapper = read(root, "app/get-invoice.qf.ts");
     assert!(wrapper.starts_with(good_wrapper.trim_end()), "{wrapper}");
     assert!(
         wrapper.contains("export const queryfirstError: never = \"getInvoice: column \\\"vat_rate\\\" does not exist"),
@@ -307,7 +307,7 @@ fn broken_query_three_channels() {
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert!(!out.stderr.contains("QF010"));
     assert_eq!(read(root, "app/get-invoice.qf.json"), good_meta);
-    assert_eq!(read(root, "app/get-invoice.query.ts"), good_wrapper);
+    assert_eq!(read(root, "app/get-invoice.qf.ts"), good_wrapper);
 }
 
 /// A TCP proxy to the test database that drops every connection once a client sends `marker`.
@@ -439,21 +439,21 @@ fn orphan_cleanup_full_run_only() {
     let root = dir.path();
     write(root, "app/a.psql", CUSTOMER);
     write(root, "app/b.psql", "SELECT id FROM invoices");
-    write(root, "app/hand-written.query.ts", "export const x = 1;\n");
+    write(root, "app/hand-written.qf.ts", "export const x = 1;\n");
     assert_eq!(generate(root, &db.url, &[]).code, 0);
     std::fs::remove_file(root.join("app/b.psql")).unwrap();
 
     let out = generate(root, &db.url, &["--json", "app/a.psql"]);
     assert_eq!(json(&out)["deleted"], serde_json::json!([]));
-    assert!(root.join("app/b.query.ts").exists());
+    assert!(root.join("app/b.qf.ts").exists());
 
     let out = generate(root, &db.url, &["--json"]);
     assert_eq!(
         json(&out)["deleted"],
-        serde_json::json!(["app/b.qf.json", "app/b.query.ts"])
+        serde_json::json!(["app/b.qf.json", "app/b.qf.ts"])
     );
-    assert!(root.join("app/hand-written.query.ts").exists());
-    assert!(root.join("app/a.query.ts").exists());
+    assert!(root.join("app/hand-written.qf.ts").exists());
+    assert!(root.join("app/a.qf.ts").exists());
 }
 
 #[test]
@@ -516,7 +516,7 @@ fn type_override_on_param_and_column() {
     );
     let p = meta.params.iter().find(|p| p.name == "prefs").unwrap();
     assert_eq!(p.type_override.as_ref().unwrap().name, "Prefs");
-    let wrapper = read(dir.path(), "q.query.ts");
+    let wrapper = read(dir.path(), "q.qf.ts");
     assert!(
         wrapper.contains("import type { Access } from '@/types/access';"),
         "{wrapper}"

@@ -105,5 +105,5 @@ fn generate_unreachable_database_is_qf090_and_writes_nothing() {
     assert!(stderr.contains("hint:"), "{stderr}");
     assert!(!stderr.contains("secret"), "{stderr}");
     assert!(!dir.path().join("a.qf.json").exists());
-    assert!(!dir.path().join("a.query.ts").exists());
+    assert!(!dir.path().join("a.qf.ts").exists());
 }
