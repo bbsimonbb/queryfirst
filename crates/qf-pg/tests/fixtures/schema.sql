@@ -31,4 +31,29 @@ CREATE TABLE invoices (
     notes text
 );
 
+-- Row hooks that may replace a NULL before NOT NULL is checked (required inference must not trust
+-- these NOT NULL targets): a BEFORE INSERT trigger on posts, an ON UPDATE rule on drafts.
+CREATE TABLE posts (
+    id serial PRIMARY KEY,
+    title text NOT NULL,
+    slug text NOT NULL
+);
+
+CREATE FUNCTION posts_fill_slug() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.slug := coalesce(NEW.slug, lower(NEW.title));
+    RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER posts_fill_slug BEFORE INSERT ON posts
+    FOR EACH ROW EXECUTE FUNCTION posts_fill_slug();
+
+CREATE TABLE drafts (
+    id serial PRIMARY KEY,
+    body text NOT NULL
+);
+
+CREATE RULE drafts_notify AS ON UPDATE TO drafts DO ALSO NOTIFY drafts;
+
 INSERT INTO customers (email, name) VALUES ('ada@example.fr', 'Ada'), ('bob@example.fr', NULL);

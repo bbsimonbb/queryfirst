@@ -16,7 +16,7 @@ use pg_query::protobuf::{
 };
 use qf_meta::NullableReason;
 
-use crate::{Catalog, CatalogColumn, Described};
+use crate::{Catalog, CatalogColumn, CatalogTable, Described, WriteOp};
 
 /// What the analyzer needs from the catalog; implemented by [`Catalog`] and by test fakes.
 pub trait CatalogView {
@@ -32,6 +32,12 @@ pub trait CatalogView {
     /// (`FROM t AS x(a, b)`). Without it, those give up.
     fn table_columns(&self, _schema: Option<&str>, _table: &str) -> Option<Vec<CatalogColumn>> {
         None
+    }
+    /// Whether a row trigger or rule may replace the values `op` writes into the table (see
+    /// [`CatalogTable::may_replace_values`]). Defaults to `true`, the safe answer: required
+    /// inference then never trusts a `NOT NULL` target of a view that cannot tell.
+    fn may_replace_values(&self, _schema: Option<&str>, _table: &str, _op: WriteOp) -> bool {
+        true
     }
 }
 
@@ -55,6 +61,11 @@ impl CatalogView for Catalog {
 
     fn table_columns(&self, schema: Option<&str>, table: &str) -> Option<Vec<CatalogColumn>> {
         Some(self.table_ref(schema, table)?.columns.clone())
+    }
+
+    fn may_replace_values(&self, schema: Option<&str>, table: &str, op: WriteOp) -> bool {
+        self.table_ref(schema, table)
+            .is_none_or(|t: &CatalogTable| t.may_replace_values(op))
     }
 }
 

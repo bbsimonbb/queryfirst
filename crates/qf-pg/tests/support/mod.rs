@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use qf_meta::{NullableReason, RequiredReason, TypeCategory, TypeRef};
-use qf_pg::{CatalogColumn, CatalogView, ColumnNullability, ParamRequirement};
+use qf_pg::{CatalogColumn, CatalogView, ColumnNullability, ParamRequirement, WriteOp};
 
 /// One `.sql` fixture: its first line is `-- expect: name=notnull other=nullable:outer-join …`.
 #[derive(Debug, Clone)]
@@ -134,7 +134,7 @@ pub fn stripped(name: &str) -> &str {
 }
 
 /// An in-memory [`CatalogView`] with the tables of `tests/fixtures/schema.sql`, in schema
-/// `public` (the only schema on its search path). Table oids are 1, 2, 3; attnums count from 1.
+/// `public` (the only schema on its search path). Table oids count from 1 in order; attnums too.
 /// (schema, table, [(column, not null)]).
 type FakeTable = (&'static str, &'static str, Vec<(&'static str, bool)>);
 
@@ -147,7 +147,13 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("invoices", "id"),
     ("invoices", "total"),
     ("invoices", "issued_on"),
+    ("posts", "id"),
+    ("drafts", "id"),
 ];
+
+/// (table, op) pairs where a row trigger or rule may replace written values, as in
+/// `tests/fixtures/schema.sql`: `posts` has a BEFORE INSERT trigger, `drafts` an ON UPDATE rule.
+const HOOKS: &[(&str, WriteOp)] = &[("posts", WriteOp::Insert), ("drafts", WriteOp::Update)];
 
 pub struct FakeCatalog {
     tables: Vec<FakeTable>,
@@ -194,6 +200,12 @@ impl FakeCatalog {
                         ("notes", false),
                     ],
                 ),
+                (
+                    "public",
+                    "posts",
+                    vec![("id", true), ("title", true), ("slug", true)],
+                ),
+                ("public", "drafts", vec![("id", true), ("body", true)]),
             ],
         }
     }
@@ -240,6 +252,13 @@ impl CatalogView for FakeCatalog {
         let t = (table_oid as usize).checked_sub(1)?;
         let c = usize::try_from(attnum).ok()?.checked_sub(1)?;
         (t < self.tables.len() && c < self.tables[t].2.len()).then(|| self.col(t, c))
+    }
+
+    fn may_replace_values(&self, schema: Option<&str>, table: &str, op: WriteOp) -> bool {
+        match self.find(schema, table) {
+            Some(t) => HOOKS.contains(&(self.tables[t].1, op)),
+            None => true,
+        }
     }
 
     fn table_columns(&self, schema: Option<&str>, table: &str) -> Option<Vec<CatalogColumn>> {

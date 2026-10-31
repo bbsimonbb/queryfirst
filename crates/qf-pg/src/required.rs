@@ -3,7 +3,9 @@
 //! A parameter is required when an annotation says so (`:p!`), or when *every* occurrence of its
 //! placeholder in the statement is in a qualifying position:
 //! - a value of the top-level `INSERT … VALUES` (any row) or the top-level `UPDATE … SET col =`,
-//!   for a `NOT NULL` catalog column that has no default;
+//!   for a `NOT NULL` catalog column that has no default, on a table where no `BEFORE` /
+//!   `INSTEAD OF` row trigger or rewrite rule for that operation (on it or a descendant) may
+//!   replace the value before the constraint is checked;
 //! - a side of `<notnull column> = $n` in the top-level `WHERE`, or in the `ON` of an inner join
 //!   of the top-level `FROM`, reached only through `AND`. The column must be non-null as the
 //!   nullability analyzer sees it, so a column on the nullable side of an outer join never counts.
@@ -23,8 +25,8 @@ use pg_query::protobuf::{self as pb, AExprKind, BoolExprType, JoinType, SetOpera
 use qf_meta::RequiredReason;
 use qf_sqlfile::{Marker, ParamUse};
 
-use crate::CatalogColumn;
 use crate::nullability::{Analyzer, CatalogView, Scope, node_of, str_of, target_rel};
+use crate::{CatalogColumn, WriteOp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParamRequirement {
@@ -162,6 +164,12 @@ fn statement(a: &mut Analyzer, cat: &dyn CatalogView, node: &NodeEnum, hits: &mu
                 filters(a, &scope, &s.from_clause, s.where_clause.as_deref(), hits);
                 Some(())
             });
+            // The WHERE above still counts: a trigger or rule cannot change which rows match.
+            // The SET values do not when one may replace them.
+            let schema = schema_of(relation);
+            if cat.may_replace_values(schema, &relation.relname, WriteOp::Update) {
+                return;
+            }
             for t in &s.target_list {
                 // `SET col = $n` only: not `SET col[1] =`, `SET col.f =` or `SET (a, b) =`.
                 let Some(NodeEnum::ResTarget(rt)) = &t.node else {
@@ -170,7 +178,7 @@ fn statement(a: &mut Analyzer, cat: &dyn CatalogView, node: &NodeEnum, hits: &mu
                 if !rt.indirection.is_empty() {
                     continue;
                 }
-                let col = cat.column_by_name(schema_of(relation), &relation.relname, &rt.name);
+                let col = cat.column_by_name(schema, &relation.relname, &rt.name);
                 target_value(col.as_ref(), rt.val.as_deref(), hits);
             }
         }
@@ -208,6 +216,10 @@ fn insert(cat: &dyn CatalogView, s: &pb::InsertStmt, hits: &mut Hits) {
         return;
     }
     let schema = schema_of(relation);
+    // A trigger or rule may fill in a NULL (`NEW.slug := coalesce(NEW.slug, …)`).
+    if cat.may_replace_values(schema, &relation.relname, WriteOp::Insert) {
+        return;
+    }
     let explicit = !s.cols.is_empty();
     let cols: Vec<Option<CatalogColumn>> = if explicit {
         s.cols

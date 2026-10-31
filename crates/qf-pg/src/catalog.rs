@@ -30,6 +30,29 @@ pub struct CatalogTable {
     /// `relkind`: `r`, `p`, `v`, `m` or `f`.
     pub kind: char,
     pub columns: Vec<CatalogColumn>,
+    /// A `BEFORE` or `INSTEAD OF` row trigger or a rewrite rule on `INSERT`, on the relation or
+    /// on any descendant: the values an `INSERT` writes may not be the ones it was given.
+    pub hooks_insert: bool,
+    /// The same for `UPDATE`.
+    pub hooks_update: bool,
+}
+
+/// A write whose values row hooks (triggers, rules) may replace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOp {
+    Insert,
+    Update,
+}
+
+impl CatalogTable {
+    /// Whether a `BEFORE` / `INSTEAD OF` row trigger or a rule may replace the values `op`
+    /// writes (a NULL may then be legitimate in a `NOT NULL` column).
+    pub fn may_replace_values(&self, op: WriteOp) -> bool {
+        match op {
+            WriteOp::Insert => self.hooks_insert,
+            WriteOp::Update => self.hooks_update,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +135,42 @@ WHERE a.attnum > 0 AND NOT a.attisdropped
   AND n.nspname NOT LIKE 'pg\\_toast%'
 ORDER BY c.oid, a.attnum";
 
+/// Relations whose written values a row hook may replace before `NOT NULL` is checked, with the
+/// operations concerned:
+/// - enabled (any mode but `D`) row-level `BEFORE` or `INSTEAD OF` triggers on `INSERT` /
+///   `UPDATE` (`tgtype` bits: 1 row, 2 before, 4 insert, 16 update, 64 instead). Internal
+///   triggers are skipped unless cloned from a parent's (`tgparentid`, PG 13+);
+/// - enabled rewrite rules on `INSERT` / `UPDATE` (`ev_type` '3' / '2'; never `_RETURN`);
+/// - and a relation is flagged for its descendants' hooks too: a partitioned parent routes rows
+///   into partitions, and an `UPDATE` of an inheritance parent updates its children's rows.
+const ROW_HOOKS_SQL: &str = "WITH RECURSIVE tree (ancestor, descendant) AS (
+    SELECT i.inhparent, i.inhrelid FROM pg_catalog.pg_inherits i
+    UNION
+    SELECT t.ancestor, i.inhrelid
+    FROM tree t JOIN pg_catalog.pg_inherits i ON i.inhparent = t.descendant
+),
+own (relid, on_insert, on_update) AS (
+    SELECT g.tgrelid, (g.tgtype::int & 4) <> 0, (g.tgtype::int & 16) <> 0
+    FROM pg_catalog.pg_trigger g
+    WHERE (g.tgtype::int & 1) <> 0
+      AND (g.tgtype::int & 66) <> 0
+      AND (g.tgtype::int & 20) <> 0
+      AND g.tgenabled <> 'D'
+      AND (NOT g.tgisinternal OR g.tgparentid <> 0)
+    UNION ALL
+    SELECT r.ev_class, r.ev_type = '3', r.ev_type = '2'
+    FROM pg_catalog.pg_rewrite r
+    WHERE r.ev_type IN ('2', '3') AND r.rulename <> '_RETURN' AND r.ev_enabled <> 'D'
+)
+SELECT a.relid, bool_or(o.on_insert), bool_or(o.on_update)
+FROM own o
+CROSS JOIN LATERAL (
+    SELECT o.relid
+    UNION
+    SELECT t.ancestor FROM tree t WHERE t.descendant = o.relid
+) AS a (relid)
+GROUP BY a.relid";
+
 const SETTINGS_SQL: &str = "SELECT current_setting('TimeZone'), current_schemas(false)::text[]";
 
 /// Run one catalog query under the pool's query timeout; a timeout or a lost connection is
@@ -182,6 +241,8 @@ impl Catalog {
                         name: table.clone(),
                         kind: first_char(row.get::<_, &str>(3)),
                         columns: Vec::new(),
+                        hooks_insert: false,
+                        hooks_update: false,
                     });
                     cat.tables.len() - 1
                 }
@@ -198,6 +259,18 @@ impl Catalog {
             let cols = &mut cat.tables[t].columns;
             cat.columns.insert((oid, attnum), (t, cols.len()));
             cols.push(column);
+        }
+        let by_oid: HashMap<u32, usize> = cat
+            .tables
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.oid, i))
+            .collect();
+        for row in timed(pool, client.query(ROW_HOOKS_SQL, &[])).await? {
+            if let Some(&i) = by_oid.get(&row.get::<_, u32>(0)) {
+                cat.tables[i].hooks_insert = row.get(1);
+                cat.tables[i].hooks_update = row.get(2);
+            }
         }
         Ok(cat)
     }

@@ -10,7 +10,7 @@ mod errors;
 mod nullability;
 mod required;
 
-pub use catalog::{Catalog, CatalogColumn, CatalogTable};
+pub use catalog::{Catalog, CatalogColumn, CatalogTable, WriteOp};
 pub use connect::{
     ConnError, ConnSource, DEFAULT_QUERY_TIMEOUT, KEEPALIVES_IDLE, Pool, PooledClient,
     ResolvedConn, SslMode, connect_pool, resolve_connection,
