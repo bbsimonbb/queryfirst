@@ -197,7 +197,8 @@ async fn no_inherit_not_null_untrusts_parent() {
 
 /// A foreign-table child or partition: its NOT NULL is not enforced, so neither it nor its
 /// ancestors are trusted. The wrapper has no handler (nothing is ever read through it); FDW and
-/// server are database-wide, so they are named after the temp schema and dropped here.
+/// server are database-wide, so they are named after the temp schema for `with_db` to drop them
+/// (also when the test fails).
 #[tokio::test]
 async fn foreign_descendant_untrusts_parent() {
     with_db(|db| async move {
@@ -220,10 +221,6 @@ async fn foreign_descendant_untrusts_parent() {
             not_null(&db, "fpt", "a").await,
             not_null(&db, "pt", "a").await,
         );
-        db.admin
-            .batch_execute(&format!("DROP FOREIGN DATA WRAPPER {s}_fdw CASCADE"))
-            .await
-            .unwrap();
         assert_eq!(got, (false, false, false, false));
     })
     .await;

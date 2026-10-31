@@ -40,7 +40,8 @@ fn with_search_path(url: &str, schema: &str) -> String {
     format!("{url}{sep}options=-c%20search_path%3D{schema}")
 }
 
-/// Create a temp schema with the fixture, run `body`, then drop the schema even if `body` panics.
+/// Create a temp schema with the fixture, run `body`, then drop the schema (and the database-wide
+/// objects named after it) even if `body` panics.
 pub async fn with_db<F, Fut>(body: F)
 where
     F: FnOnce(Db) -> Fut,
@@ -81,8 +82,12 @@ where
     }
     .await;
 
+    // Database-wide objects a test creates are named after its schema (`{schema}_fdw`, with its
+    // servers): dropped here too, so a failing test leaves nothing behind.
     admin
-        .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .batch_execute(&format!(
+            "DROP FOREIGN DATA WRAPPER IF EXISTS {schema}_fdw CASCADE; DROP SCHEMA {schema} CASCADE"
+        ))
         .await
         .expect("drop temp schema");
     if let Err(e) = outcome {

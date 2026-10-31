@@ -151,7 +151,9 @@ fn snapshot(root: &Path) -> BTreeMap<String, Vec<u8>> {
     out
 }
 
-const LEFT_JOIN: &str = "/* @name orders */\nSELECT c.id, o.total FROM customers c LEFT JOIN orders o ON o.customer_id = c.id WHERE c.id = :id!\n";
+/// `invoices.total` is NOT NULL but nullable through the outer join. (The fixture schema has no
+/// `orders` table; the query keeps its name.)
+const LEFT_JOIN: &str = "/* @name orders */\nSELECT c.id, i.total FROM customers c LEFT JOIN invoices i ON i.customer_id = c.id WHERE c.id = :id!\n";
 
 #[test]
 fn describe_file_writes_nothing() {
