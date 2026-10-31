@@ -13,7 +13,7 @@ fn version_prints() {
 
 #[test]
 fn subcommands_are_not_implemented() {
-    for sub in ["test", "bundle", "schema", "init"] {
+    for sub in ["schema", "init"] {
         Command::cargo_bin("qf")
             .unwrap()
             .arg(sub)

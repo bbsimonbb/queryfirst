@@ -46,10 +46,30 @@ enum Command {
         /// Files or directories to narrow the scope (taken literally, never globbed).
         paths: Vec<PathBuf>,
     },
-    /// Run query tests against the database.
-    Test,
-    /// Bundle generated output.
-    Bundle,
+    /// Re-describe every committed query against a target database and report every
+    /// difference; fails on breaking ones. Read-only; uses only meta files.
+    Test {
+        /// Files or directories to narrow the scope (taken literally, never globbed). With
+        /// --manifest, they select queries by source path.
+        paths: Vec<PathBuf>,
+        /// Connection string (else test.connection.env, DATABASE_URL / PG*, then
+        /// test.connection.command).
+        #[arg(long, value_name = "CONN")]
+        db: Option<String>,
+        /// Read the metas from this manifest (written by `qf bundle`) instead of the project
+        /// tree. Needs no queryfirst.json and no source files.
+        #[arg(long, value_name = "FILE")]
+        manifest: Option<PathBuf>,
+        /// Fail on any difference, notes and warnings included.
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Write every meta file into one queryfirst.manifest.json, for deployment.
+    Bundle {
+        /// Where to write the manifest (default: queryfirst.manifest.json at the project root).
+        #[arg(short = 'o', long = "output", value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
     /// Inspect the database schema.
     Schema,
     /// Initialise a Queryfirst project.
@@ -65,9 +85,18 @@ fn find_project_dir(start: &Path) -> PathBuf {
         .to_path_buf()
 }
 
+/// `p` relative to the current directory.
+fn absolute(cwd: &std::io::Result<PathBuf>, p: PathBuf) -> PathBuf {
+    match cwd {
+        Ok(cwd) if p.is_relative() => cwd.join(p),
+        _ => p,
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let cwd = std::env::current_dir();
+    let explicit_project = cli.project.clone();
     let project = match cli.project {
         Some(p) => p,
         None => match &cwd {
@@ -116,8 +145,38 @@ fn main() -> ExitCode {
             let code = queryfirst::cmd::check::run(&project, &paths, cli.json);
             return ExitCode::from(code);
         }
-        Command::Test => "test",
-        Command::Bundle => "bundle",
+        Command::Test {
+            paths,
+            db,
+            manifest,
+            strict,
+        } => {
+            let paths: Vec<PathBuf> = paths.into_iter().map(|p| absolute(&cwd, p)).collect();
+            let code = match manifest {
+                // A deployment: the settings come from a queryfirst.json in the current
+                // directory (or --project), if there is one.
+                Some(m) => {
+                    let dir = match (&explicit_project, &cwd) {
+                        (Some(p), _) => p.clone(),
+                        (None, Ok(cwd)) => cwd.clone(),
+                        (None, Err(_)) => project.clone(),
+                    };
+                    let m = absolute(&cwd, m);
+                    let source = queryfirst::cmd::test::Source::Manifest(&m, &paths);
+                    queryfirst::cmd::test::run(&dir, source, db.as_deref(), strict, cli.json)
+                }
+                None => {
+                    let source = queryfirst::cmd::test::Source::Tree(&paths);
+                    queryfirst::cmd::test::run(&project, source, db.as_deref(), strict, cli.json)
+                }
+            };
+            return ExitCode::from(code);
+        }
+        Command::Bundle { output } => {
+            let output = output.map(|p| absolute(&cwd, p));
+            let code = queryfirst::cmd::bundle::run(&project, output.as_deref(), cli.json);
+            return ExitCode::from(code);
+        }
         Command::Schema => "schema",
         Command::Init => "init",
     };

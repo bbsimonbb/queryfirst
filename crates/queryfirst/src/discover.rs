@@ -5,10 +5,14 @@
 use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
+use qf_meta::meta_path_for;
 use qf_sqlfile::{Diagnostic, Severity};
 
 use crate::config::Config;
 use crate::posix;
+
+/// The suffix of meta files: `foo.psql` has `foo.qf.json`.
+pub const META_SUFFIX: &str = ".qf.json";
 
 /// Compile one config glob: `*` and `?` never match `/`, `**` spans directories.
 pub fn glob(pattern: &str) -> Result<Glob, globset::Error> {
@@ -117,6 +121,32 @@ fn canonical(p: &Path) -> Result<PathBuf, Diagnostic> {
     std::fs::canonicalize(p).map_err(|e| usage_error(format!("cannot access {}: {e}", p.display())))
 }
 
+/// A command-line path: canonical, and project-relative as POSIX text. It must exist and be
+/// inside the project.
+fn resolve_arg(project: &Path, root: &Path, arg: &Path) -> Result<(PathBuf, String), Diagnostic> {
+    let abs = if arg.is_absolute() {
+        arg.to_path_buf()
+    } else {
+        project.join(arg)
+    };
+    if !abs.exists() {
+        return Err(usage_error(format!(
+            "no such file or directory: {}",
+            arg.display()
+        )));
+    }
+    let abs = canonical(&abs)?;
+    let rel = abs.strip_prefix(root).map_err(|_| {
+        usage_error(format!(
+            "{} is outside the project directory {}",
+            arg.display(),
+            project.display()
+        ))
+    })?;
+    let rel = posix(rel);
+    Ok((abs, rel))
+}
+
 /// The query files in scope, as project-relative paths, sorted and without duplicates.
 /// Without `cli_paths` that is the whole project. Relative `cli_paths` are relative to `project`
 /// (the CLI makes them absolute first). A file argument must be a query file by the config's
@@ -146,26 +176,7 @@ pub fn discover(
         walk_dir("", &mut found)?;
     }
     for arg in cli_paths {
-        let abs = if arg.is_absolute() {
-            arg.clone()
-        } else {
-            project.join(arg)
-        };
-        if !abs.exists() {
-            return Err(usage_error(format!(
-                "no such file or directory: {}",
-                arg.display()
-            )));
-        }
-        let abs = canonical(&abs)?;
-        let rel = abs.strip_prefix(&root).map_err(|_| {
-            usage_error(format!(
-                "{} is outside the project directory {}",
-                arg.display(),
-                project.display()
-            ))
-        })?;
-        let rel = posix(rel);
+        let (abs, rel) = resolve_arg(project, &root, arg)?;
         if abs.is_dir() {
             walk_dir(&rel, &mut found)?;
         } else if m.is_query(&rel) {
@@ -180,4 +191,51 @@ pub fn discover(
     found.sort();
     found.dedup();
     Ok(found.into_iter().map(PathBuf::from).collect())
+}
+
+/// The meta files in scope, as project-relative POSIX paths, sorted and without duplicates:
+/// every `*.qf.json` the config does not exclude, in the whole project or under `cli_paths`.
+/// Only meta files are needed, never the query files. A file argument is a meta file, or a
+/// query file standing for its meta (which may be missing: reading it then fails).
+pub fn discover_metas(
+    project: &Path,
+    cfg: &Config,
+    cli_paths: &[PathBuf],
+) -> Result<Vec<String>, Diagnostic> {
+    let m = Matcher::new(cfg);
+    let root = canonical(project)?;
+    let mut found: Vec<String> = Vec::new();
+    let walk_dir = |rel: &str, found: &mut Vec<String>| {
+        walk(&root, rel, &m, &mut |f| {
+            if f.ends_with(META_SUFFIX) && !m.excluded(f) {
+                found.push(f.to_string());
+            }
+        })
+        .map_err(|e| {
+            usage_error(format!(
+                "cannot read directory {}: {e}",
+                root.join(rel).display()
+            ))
+        })
+    };
+    if cli_paths.is_empty() {
+        walk_dir("", &mut found)?;
+    }
+    for arg in cli_paths {
+        let (abs, rel) = resolve_arg(project, &root, arg)?;
+        if abs.is_dir() {
+            walk_dir(&rel, &mut found)?;
+        } else if rel.ends_with(META_SUFFIX) {
+            found.push(rel);
+        } else if m.is_query(&rel) {
+            found.push(posix(&meta_path_for(Path::new(&rel))));
+        } else {
+            return Err(usage_error(format!(
+                "{rel} is neither a meta file (*.qf.json) nor a query file of the project"
+            )));
+        }
+    }
+    found.sort();
+    found.dedup();
+    Ok(found)
 }

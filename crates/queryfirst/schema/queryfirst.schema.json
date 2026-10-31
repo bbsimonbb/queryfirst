@@ -29,7 +29,7 @@
       "description": "Without it, the connection comes from DATABASE_URL, else the standard PG* variables."
     },
     "pool": { "type": "integer", "minimum": 1, "default": 8, "description": "Connection pool size; describes run in parallel up to this many." },
-    "timestamp": { "const": "utc", "description": "How timestamp (without time zone) values are read (phase 2)." },
+    "timestamp": { "const": "utc", "description": "How timestamp (without time zone) values are read (phase 2). When \"utc\", `qf test` checks that the database time zone is UTC (QF048); `qf bundle` carries it into the manifest." },
     "test": {
       "type": "object",
       "additionalProperties": false,
@@ -38,8 +38,8 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "env": { "type": "string", "description": "Environment variable holding the target database connection string." },
-            "command": { "type": "string", "description": "Command whose standard output is the connection string." }
+            "env": { "type": "string", "description": "Environment variable holding the target database connection string. Order: `--db`, this variable, DATABASE_URL / the PG* variables, then `command`." },
+            "command": { "type": "string", "description": "Command run through the platform shell whose standard output is the connection string (tried last). The string is never printed or written." }
           }
         }
       },

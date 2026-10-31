@@ -125,3 +125,38 @@ fn missing_or_outside_paths_are_errors() {
     let err = discover(root, &Config::default(), &[other.path().join("x.psql")]).unwrap_err();
     assert_eq!(err.code, "QF091");
 }
+
+#[test]
+fn metas_in_scope() {
+    use queryfirst::discover::discover_metas;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for rel in [
+        "app/[id]/(queries)/a.qf.json",
+        "app/b.qf.json",
+        "app/b.psql",
+        "app/c.psql",
+        "node_modules/x/d.qf.json",
+        "other/e.qf.json",
+    ] {
+        touch(root, rel);
+    }
+    let cfg = Config::default();
+    assert_eq!(
+        discover_metas(root, &cfg, &[]).unwrap(),
+        [
+            "app/[id]/(queries)/a.qf.json",
+            "app/b.qf.json",
+            "other/e.qf.json"
+        ]
+    );
+    // A directory is walked; a query file stands for its meta, even one not written yet.
+    let args = [root.join("app/[id]/(queries)"), root.join("app/c.psql")];
+    assert_eq!(
+        discover_metas(root, &cfg, &args).unwrap(),
+        ["app/[id]/(queries)/a.qf.json", "app/c.qf.json"]
+    );
+    touch(root, "app/notes.txt");
+    let err = discover_metas(root, &cfg, &[root.join("app/notes.txt")]).unwrap_err();
+    assert_eq!(err.code, "QF091");
+}

@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 pub enum MetaError {
     /// The file was written by a newer Queryfirst.
     FutureVersion(u64),
+    /// The manifest was written by a newer Queryfirst.
+    FutureManifestVersion(u64),
     Json(serde_json::Error),
 }
 
@@ -15,6 +17,11 @@ impl fmt::Display for MetaError {
             MetaError::FutureVersion(v) => write!(
                 f,
                 "meta file version {v} was written by a newer Queryfirst (this one supports up to version {META_VERSION}); upgrade qf"
+            ),
+            MetaError::FutureManifestVersion(v) => write!(
+                f,
+                "manifest version {v} was written by a newer Queryfirst (this one supports up to version {}); upgrade qf",
+                crate::MANIFEST_VERSION
             ),
             MetaError::Json(e) => write!(f, "invalid meta file: {e}"),
         }

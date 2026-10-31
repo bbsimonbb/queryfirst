@@ -19,8 +19,8 @@ use qf_pg::{
     infer_required, is_connection_error, to_diagnostic,
 };
 use qf_sqlfile::{
-    Diagnostic, ExpansionKind, LexedQuery, Marker, OverrideTarget, QueryFile, Severity, lex_params,
-    name_from_path, normalise, parse_query_file,
+    Diagnostic, Expansion, ExpansionKind, LexedQuery, Marker, OverrideTarget, PickKey, QueryFile,
+    Severity, TypeOverrideDecl, lex_params, name_from_path, normalise, parse_query_file,
 };
 
 use crate::config::Config;
@@ -175,7 +175,7 @@ fn finish(
     }
 }
 
-fn connection_lost(source: &str, e: &PgQueryError) -> ConnError {
+pub(crate) fn connection_lost(source: &str, e: &PgQueryError) -> ConnError {
     let detail = match e {
         PgQueryError::Connection(m) => m.clone(),
         PgQueryError::Db { code, message, .. } => format!("{message} (SQLSTATE {code})"),
@@ -253,6 +253,34 @@ pub async fn analyze_query<D: Describe>(
             return Ok(finish(src, meta, diags, previous, body_pos));
         }
     };
+    assemble(
+        q,
+        src.normalised,
+        &lexed,
+        &described,
+        cat,
+        &mut meta,
+        &mut diags,
+    );
+    Ok(finish(src, meta, diags, previous, body_pos))
+}
+
+/// Fill `meta`'s params and columns from what the database `described` for `lexed`, applying
+/// the query's own declarations: alias suffixes (`"x!"`, `"x?"`), `:p!` / `:p?`, pick keys'
+/// `!` and `@type`. Problems go to `diags`. `false` (with a `QF010`) when the database reported
+/// a different number of parameters than the statement has; params and columns stay empty.
+///
+/// `normalised` is the source text, used only to position `@type` diagnostics.
+pub fn assemble(
+    q: &QueryFile,
+    normalised: &str,
+    lexed: &LexedQuery,
+    described: &Described,
+    cat: &Catalog,
+    meta: &mut QueryMeta,
+    diags: &mut Vec<Diagnostic>,
+) -> bool {
+    let body_pos = (q.body_line, q.body_col);
     if described.params.len() != lexed.param_order.len() {
         diags.push(error(
             "QF010",
@@ -264,12 +292,12 @@ pub async fn analyze_query<D: Describe>(
             ),
             None,
         ));
-        return Ok(finish(src, meta, diags, previous, body_pos));
+        return false;
     }
 
-    meta.columns = columns(&lexed, &described, cat, &mut diags, body_pos);
-    meta.params = params(q, &lexed, &described, cat);
-    apply_type_overrides(q, src.normalised, &mut meta, &mut diags);
+    meta.columns = columns(lexed, described, cat, diags, body_pos);
+    meta.params = params(q, lexed, described, cat);
+    apply_type_overrides(q, normalised, meta, diags);
 
     let gave_up: Vec<String> = meta
         .columns
@@ -299,7 +327,73 @@ pub async fn analyze_query<D: Describe>(
             col: body_pos.1,
         });
     }
-    Ok(finish(src, meta, diags, previous, body_pos))
+    true
+}
+
+/// The query file a committed meta was generated from, as far as [`assemble`] needs it: its
+/// statement (`statement.source` keeps the `:p!` / `:p?` markers and the alias suffixes) as the
+/// body, its `@param` expansions and its `@type` declarations. Used where only the meta exists
+/// (`qf test`, possibly from a manifest). Lexing the result gives back the meta's statements.
+///
+/// A pick key recorded `required` becomes a `key!` declaration: the meta does not tell the
+/// author's `!` from inference, so both are kept as the author's.
+pub fn query_file_from_meta(meta: &QueryMeta) -> QueryFile {
+    let keys = |keys: &[PickKeyMeta]| -> Vec<PickKey> {
+        keys.iter()
+            .map(|k| PickKey {
+                name: k.name.clone(),
+                required: k.required,
+            })
+            .collect()
+    };
+    let expansions = meta
+        .params
+        .iter()
+        .filter_map(|p| {
+            let kind = match &p.transform {
+                Transform::Scalar => return None,
+                Transform::Spread => ExpansionKind::Spread,
+                Transform::Pick { keys: k } => ExpansionKind::Pick(keys(k)),
+                Transform::PickSpread { keys: k } => ExpansionKind::PickSpread(keys(k)),
+            };
+            Some(Expansion {
+                param: p.name.clone(),
+                kind,
+            })
+        })
+        .collect();
+    let decl = |target: OverrideTarget, ov: &TypeOverride| TypeOverrideDecl {
+        target,
+        type_name: ov.name.clone(),
+        array: ov.array,
+        module: ov.module.clone(),
+        line: 1,
+    };
+    let type_overrides = meta
+        .columns
+        .iter()
+        .filter_map(|c| {
+            let ov = c.type_override.as_ref()?;
+            Some(decl(OverrideTarget::Column(c.name.clone()), ov))
+        })
+        .chain(meta.params.iter().filter_map(|p| {
+            let ov = p.type_override.as_ref()?;
+            Some(decl(OverrideTarget::Param(p.name.clone()), ov))
+        }))
+        .collect();
+    QueryFile {
+        name: meta.name.clone(),
+        name_from_annotation: true,
+        description: meta.description.clone(),
+        expansions,
+        type_overrides,
+        returns: None,
+        body: meta.statement.source.clone(),
+        body_offset: 0,
+        body_line: 1,
+        body_col: 1,
+        diagnostics: Vec::new(),
+    }
 }
 
 fn columns(

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://queryfirst.dev/schema/queryfirst.manifest.v1.schema.json",
+  "title": "Queryfirst deployment manifest (version 1)",
+  "description": "Written by `qf bundle` (default `queryfirst.manifest.json` at the project root) and read by `qf test --manifest <file>` in a deployment, where no source tree exists. Every meta file of the project in one document. Formatting is canonical: keys in the order documented here, 2-space indent, LF, trailing newline; queries sorted by source, so the same metas always give the same bytes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "settings", "queries"],
+  "properties": {
+    "version": { "const": 1, "description": "Manifest format version. Readers must reject a larger value (written by a newer Queryfirst)." },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timestamp": { "const": "utc", "description": "queryfirst.json's `timestamp`. When \"utc\", `qf test` checks that the database time zone is UTC (QF048). A queryfirst.json present where `qf test` runs takes precedence." }
+      },
+      "description": "Project settings `qf test` needs without a queryfirst.json. Optional keys are omitted when absent."
+    },
+    "queries": {
+      "type": "array",
+      "items": { "$ref": "qf-meta.v1.schema.json" },
+      "description": "Every meta file (qf-meta.v1), sorted by `source`."
+    }
+  }
+}
