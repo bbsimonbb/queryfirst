@@ -1,0 +1,8 @@
+[package]
+name = "qf-gen-ts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+qf-meta.workspace = true

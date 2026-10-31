@@ -1,0 +1,23 @@
+[package]
+name = "queryfirst"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "qf"
+path = "src/main.rs"
+
+[features]
+db-tests = ["qf-pg/db-tests"]
+
+[dependencies]
+qf-sqlfile.workspace = true
+qf-meta.workspace = true
+qf-pg.workspace = true
+qf-gen-ts.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
