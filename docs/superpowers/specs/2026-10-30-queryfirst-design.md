@@ -301,6 +301,7 @@ Context: simplyfirst's API routes are thin. Query results go over the wire uncha
 - **Index inspection.** While describing, run `EXPLAIN` (not `ANALYZE`) for queries, know the filter and join columns, and report likely missing indexes, possibly suggesting the `CREATE INDEX`.
 - (Moved: the C# and TypeScript generators for SQL Server are now a planned milestone, §2a.)
 - A long-running mode or language server, where a reactive runtime such as Octopus might fit.
+- **MCP server (`qf mcp`).** A thin layer over the same engine, serving `describe`, `schema`, `generate` and `check` as typed tools over stdio, and possibly tables and meta files as resources. What it adds over the CLI: agents discover the tools without reading AGENTS.md, and a warm connection and catalog make repeated `describe`/`schema` calls near-instant (this is where the long-running mode above would live). The CLI stays the core: it works from any agent, in CI and in the deploy health check. Costs: a second surface to maintain, configuration in every client, and connection secrets in that client's config.
 
 ## 18. Decisions
 
