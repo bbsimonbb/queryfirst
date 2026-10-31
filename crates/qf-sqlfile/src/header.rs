@@ -182,7 +182,16 @@ pub fn parse_query_file(path: &Path, normalised: &str) -> Result<QueryFile, Vec<
         .trim_end_matches(|c: char| c.is_whitespace() || c == ';')
         .to_string();
 
-    check_single_statement(&mut cx, &body, body_offset);
+    if scan(&body).first_code.is_none() {
+        cx.err(
+            "QF001",
+            0,
+            "no SQL statement in the file".into(),
+            Some("Write the query after the header comment"),
+        );
+    } else {
+        check_single_statement(&mut cx, &body, body_offset);
+    }
 
     if !cx.diags.is_empty() {
         return Err(cx.diags);
@@ -318,12 +327,21 @@ fn parse_type(rest: &str, line: u32) -> Option<TypeOverrideDecl> {
     })
 }
 
-/// Scan SQL (string and comment aware). Returns (offset of the first code after a top-level
-/// `;`, offset of a block comment containing `@name`).
-fn scan(sql: &str) -> (Option<usize>, Option<usize>) {
+/// What [`scan`] found; offsets into the scanned SQL.
+struct Scan {
+    /// The first code: anything but whitespace and comments.
+    first_code: Option<usize>,
+    /// The first code after a top-level `;`.
+    code_after: Option<usize>,
+    /// A block comment containing `@name`.
+    name_comment: Option<usize>,
+}
+
+/// Scan SQL (string and comment aware).
+fn scan(sql: &str) -> Scan {
     let b = sql.as_bytes();
     let (mut i, mut seen_semi) = (0, false);
-    let (mut code_after, mut name_comment) = (None, None);
+    let (mut first_code, mut code_after, mut name_comment) = (None, None, None);
     while i < b.len() {
         let c = b[i];
         if c == b'-' && b.get(i + 1) == Some(&b'-') {
@@ -344,6 +362,9 @@ fn scan(sql: &str) -> (Option<usize>, Option<usize>) {
             i += 1;
             continue;
         }
+        if first_code.is_none() && c != b';' {
+            first_code = Some(i);
+        }
         if seen_semi && code_after.is_none() {
             code_after = Some(i);
         }
@@ -359,11 +380,19 @@ fn scan(sql: &str) -> (Option<usize>, Option<usize>) {
         }
         i += 1;
     }
-    (code_after, name_comment)
+    Scan {
+        first_code,
+        code_after,
+        name_comment,
+    }
 }
 
 fn check_single_statement(cx: &mut Ctx, body: &str, body_offset: usize) {
-    let (code_after, name_comment) = scan(body);
+    let Scan {
+        code_after,
+        name_comment,
+        ..
+    } = scan(body);
     let mut at = name_comment;
     if at.is_none() {
         at = match pg_query::split_with_parser(body) {

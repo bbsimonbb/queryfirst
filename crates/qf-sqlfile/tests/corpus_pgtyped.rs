@@ -81,11 +81,7 @@ fn corpus_irs_match() {
             };
             let Some(expected) = irs.get(&q.name) else {
                 // Reformatted (e.g. by prettier) into a multi-line JS literal: not pgtyped's bytes.
-                if ts_src.contains(&format!(
-                    "const {}IR: any = {{
-",
-                    q.name
-                )) {
+                if ts_src.contains(&format!("const {}IR: any = {{\n", q.name)) {
                     reformatted += 1;
                     continue;
                 }

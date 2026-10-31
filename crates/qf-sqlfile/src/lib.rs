@@ -92,7 +92,9 @@ pub struct Diagnostic {
     pub col: u32,
 }
 
-/// Normalise CRLF and lone CR line endings to LF.
+/// Normalise CRLF and lone CR line endings to LF, and drop one leading UTF-8 byte order mark
+/// (which some Windows editors write), so neither changes the parse or the hash.
 pub fn normalise(source: &str) -> String {
+    let source = source.strip_prefix('\u{FEFF}').unwrap_or(source);
     source.replace("\r\n", "\n").replace('\r', "\n")
 }

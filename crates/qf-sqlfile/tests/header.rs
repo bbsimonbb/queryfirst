@@ -161,6 +161,56 @@ fn plain_comments_before_header() {
     assert_eq!(e[0].code, "QF002");
 }
 
+/// Without a header after them, leading `--` comments stay in the body (the 1d28c74 fix must
+/// only move comments that precede an `@name` header).
+#[test]
+fn line_comment_without_header_stays_in_body() {
+    let q = ok("get-x.sql", "-- just a note\nSELECT 1");
+    assert_eq!(q.name, "getX");
+    assert!(!q.name_from_annotation);
+    assert_eq!(q.description, None);
+    assert_eq!(q.body, "-- just a note\nSELECT 1");
+    assert_eq!(q.body_offset, 0);
+    let q = ok("x.sql", "-- one\n/* two */\n-- three\nSELECT 1;\n");
+    assert_eq!(q.description, None);
+    assert_eq!(q.body, "-- one\n/* two */\n-- three\nSELECT 1");
+}
+
+#[test]
+fn utf8_bom_is_ignored() {
+    let plain = "/* @name getOrder\n   @returns one */\nSELECT 1 AS x WHERE :id = 1;\n";
+    let bom = format!("\u{FEFF}{plain}");
+    assert_eq!(normalise(&bom), plain);
+    let q = ok("get-order.sql", &bom);
+    assert_eq!(q.name, "getOrder");
+    assert!(q.name_from_annotation);
+    assert_eq!(q.returns, Some(Returns::One));
+    assert!(q.diagnostics.is_empty(), "{:?}", q.diagnostics);
+    assert_eq!(q, ok("get-order.sql", plain));
+    // Only one leading BOM is dropped; one elsewhere is text.
+    assert_eq!(normalise("\u{FEFF}\u{FEFF}a"), "\u{FEFF}a");
+    assert_eq!(normalise("a\u{FEFF}"), "a\u{FEFF}");
+}
+
+#[test]
+fn empty_statement_is_qf001() {
+    for src in [
+        "",
+        "  \n",
+        ";",
+        "/* @name empty */",
+        "/* @name empty */\n;\n",
+        "/* @name q\n   @returns none */\n-- nothing here\n",
+        "/* just a comment */",
+    ] {
+        let e = parse("empty.sql", src).unwrap_err();
+        assert_eq!(e.len(), 1, "{src:?}: {e:?}");
+        assert_eq!(e[0].code, "QF001", "{src:?}");
+        assert_eq!(e[0].message, "no SQL statement in the file", "{src:?}");
+        assert_eq!((e[0].line, e[0].col), (1, 1));
+    }
+}
+
 #[test]
 fn crlf_equivalent() {
     let lf = "/* @name q\n @param ids -> (...)\n*/\nSELECT 1;\n";
