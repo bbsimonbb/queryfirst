@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://queryfirst.dev/schema/qf-meta.v1.schema.json",
+  "title": "Queryfirst query meta (version 1)",
+  "description": "Contract between the Queryfirst core, generators, `qf test` and third-party generators. One file `foo.qf.json` is committed next to each query file `foo.sql`/`foo.psql`. It holds nothing environment-specific (no OIDs, host, database or server version). Keys are written in the order documented here; optional keys are omitted when absent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "source", "name", "sqlHash", "provider", "statement", "params", "columns", "status", "generated"],
+  "properties": {
+    "version": { "const": 1, "description": "Meta format version. Readers must reject a larger value (written by a newer Queryfirst)." },
+    "source": { "type": "string", "description": "POSIX-style, project-relative path of the query file." },
+    "name": { "type": "string", "description": "Query name (from @name or derived from the file name). Generators derive identifiers from it." },
+    "description": { "type": "string", "description": "Free-text description from the query header, if any." },
+    "sqlHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "sha256 of the query file after normalising line endings to LF. Used to detect stale meta." },
+    "provider": { "const": "postgres", "description": "Database provider the query was analysed against." },
+    "statement": { "$ref": "#/$defs/statement" },
+    "params": { "type": "array", "items": { "$ref": "#/$defs/param" }, "description": "Parameters in pgtyped order: @param declarations first, then the others by first use." },
+    "columns": { "type": "array", "items": { "$ref": "#/$defs/column" }, "description": "Result columns in order. Empty for statements returning no rows." },
+    "returns": { "enum": ["one", "maybe", "many", "none"], "description": "Cardinality declared with @returns, if any." },
+    "status": { "$ref": "#/$defs/status" },
+    "generated": { "type": "array", "items": { "$ref": "#/$defs/generatedFile" }, "description": "Files generated from this meta, with content hashes." }
+  },
+  "$defs": {
+    "statement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "db"],
+      "properties": {
+        "source": { "type": "string", "description": "Query body exactly as pgtyped's `statement` field: header removed, trailing `;` and surrounding whitespace removed, `:name` markers kept. `locs` index into this string." },
+        "db": { "type": "string", "description": "Query body with `$n` placeholders, as sent to PostgreSQL." }
+      }
+    },
+    "param": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "dbIndex", "dbType", "required", "requiredReason", "transform", "locs"],
+      "properties": {
+        "name": { "type": "string", "description": "Parameter name as written after `:` in the query." },
+        "dbIndex": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "description": "1-based `$n` indexes this parameter maps to. Empty for pick/spread transforms (see transform keys)." },
+        "dbType": { "$ref": "#/$defs/typeRef" },
+        "required": { "type": "boolean", "description": "Whether the parameter is non-nullable in generated code." },
+        "requiredReason": { "enum": ["annotation", "inferred:insert-notnull", "inferred:where-eq-notnull", "default-nullable"], "description": "Why `required` has its value: explicit annotation, inferred from a NOT NULL insert target, inferred from an equality against a NOT NULL column in WHERE, or the nullable default." },
+        "transform": { "$ref": "#/$defs/transform" },
+        "locs": { "type": "array", "items": { "$ref": "#/$defs/loc" }, "description": "Every occurrence of the parameter in `statement.source`." },
+        "typeOverride": { "$ref": "#/$defs/typeOverride" }
+      }
+    },
+    "transform": {
+      "description": "How the parameter expands in the SQL (pgtyped-compatible).",
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "scalar", "description": "A single value." } } },
+        { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "spread", "description": "An array expanded into a list of values: `(:ids...)`." } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "keys"], "properties": { "type": { "const": "pick", "description": "One object expanded into a tuple: `(:p(a, b))`." }, "keys": { "type": "array", "items": { "$ref": "#/$defs/pickKey" } } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "keys"], "properties": { "type": { "const": "pickSpread", "description": "An array of objects expanded into a list of tuples: `(:p(a, b)...)`." }, "keys": { "type": "array", "items": { "$ref": "#/$defs/pickKey" } } } }
+      ]
+    },
+    "pickKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "required", "dbIndex", "dbType"],
+      "properties": {
+        "name": { "type": "string", "description": "Property name of the object." },
+        "required": { "type": "boolean", "description": "Whether the property is non-nullable (`!` suffix)." },
+        "dbIndex": { "type": "integer", "minimum": 1, "description": "1-based `$n` index of this key." },
+        "dbType": { "$ref": "#/$defs/typeRef" }
+      }
+    },
+    "column": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "dbType", "nullable", "nullableReason"],
+      "properties": {
+        "name": { "type": "string", "description": "Result column name, with any type-override suffix stripped." },
+        "dbType": { "$ref": "#/$defs/typeRef" },
+        "nullable": { "type": "boolean", "description": "Whether the value can be NULL." },
+        "nullableReason": { "enum": ["proven-notnull", "outer-join", "expression", "analyzer-gave-up", "override"], "description": "Why `nullable` has its value: proven non-null by the analyser, made nullable by an outer join, an expression the analyser treats as nullable, the analyser gave up (conservatively nullable), or forced by an explicit override." },
+        "source": { "$ref": "#/$defs/columnSource" },
+        "typeOverride": { "$ref": "#/$defs/typeOverride" }
+      }
+    },
+    "columnSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "table", "column"],
+      "description": "Table column a result column was traced to. Omitted for computed columns.",
+      "properties": {
+        "schema": { "type": "string" },
+        "table": { "type": "string" },
+        "column": { "type": "string" }
+      }
+    },
+    "typeRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "name", "array", "category"],
+      "properties": {
+        "schema": { "type": "string", "description": "Schema owning the type, e.g. `pg_catalog`." },
+        "name": { "type": "string", "description": "PostgreSQL type name (typname), e.g. `int4`, `accessLevel`. Element type when `array` is true." },
+        "array": { "type": "boolean", "description": "True when the value is an array of `name`." },
+        "modifier": { "type": "string", "description": "Type modifier text such as `(12,2)` or `(30)`. Omitted when none." },
+        "category": { "enum": ["base", "enum", "domain", "composite", "other"], "description": "Kind of type." },
+        "enumValues": { "type": "array", "items": { "type": "string" }, "description": "Enum labels, sorted. Present only when category is `enum`." }
+      }
+    },
+    "typeOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "array"],
+      "description": "A user-chosen target type from a @type annotation or column suffix.",
+      "properties": {
+        "name": { "type": "string", "description": "Type name to use in generated code." },
+        "module": { "type": "string", "description": "Module to import the type from, if any." },
+        "array": { "type": "boolean", "description": "True when the override is an array of `name`." }
+      }
+    },
+    "loc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["a", "b"],
+      "description": "Interval in UTF-16 code units of `statement.source`, both ends inclusive (as pgtyped).",
+      "properties": {
+        "a": { "type": "integer", "minimum": 0, "description": "First UTF-16 unit of the `:name` marker." },
+        "b": { "type": "integer", "minimum": 0, "description": "Last UTF-16 unit of the marker (inclusive)." }
+      }
+    },
+    "status": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "ok", "description": "The query was analysed successfully." } } },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "diagnostics"],
+          "properties": {
+            "state": { "const": "broken", "description": "The query could not be analysed; params and columns may be incomplete. Generators must not emit code." },
+            "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } }
+          }
+        }
+      ]
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message", "line", "col"],
+      "properties": {
+        "code": { "type": "string", "description": "Stable diagnostic code, e.g. `QF001`." },
+        "severity": { "enum": ["error", "warning", "note"] },
+        "message": { "type": "string", "description": "Human-readable message." },
+        "hint": { "type": "string", "description": "Suggested fix, if any." },
+        "line": { "type": "integer", "minimum": 1, "description": "1-based line in the query file." },
+        "col": { "type": "integer", "minimum": 1, "description": "1-based column (in characters) in the query file." }
+      }
+    },
+    "generatedFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "hash"],
+      "properties": {
+        "path": { "type": "string", "description": "POSIX-style, project-relative path of a generated file." },
+        "hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "sha256 of the generated file content." }
+      }
+    }
+  }
+}

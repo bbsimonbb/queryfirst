@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "source": "app/api/(shared-queries)/address.psql",
+  "name": "addressBelongsToAccount",
+  "sqlHash": "sha256:354ceef910829bb0a3ae3a8051b989c57303fd3e9864fbf291972305eab7f0c8",
+  "provider": "postgres",
+  "statement": {
+    "source": "SELECT count(*) > 0 as \"belongs\" \nFROM addresses A\ninner join customers C on A.\"customerId\" = C.id\nWHERE A.\"id\" = :addressId and C.\"accountId\" = :accountId",
+    "db": "SELECT count(*) > 0 as \"belongs\" \nFROM addresses A\ninner join customers C on A.\"customerId\" = C.id\nWHERE A.\"id\" = $1 and C.\"accountId\" = $2"
+  },
+  "params": [
+    {
+      "name": "addressId",
+      "dbIndex": [
+        1
+      ],
+      "dbType": {
+        "schema": "pg_catalog",
+        "name": "int4",
+        "array": false,
+        "category": "base"
+      },
+      "required": false,
+      "requiredReason": "default-nullable",
+      "transform": {
+        "type": "scalar"
+      },
+      "locs": [
+        {
+          "a": 114,
+          "b": 123
+        }
+      ]
+    },
+    {
+      "name": "accountId",
+      "dbIndex": [
+        2
+      ],
+      "dbType": {
+        "schema": "pg_catalog",
+        "name": "int4",
+        "array": false,
+        "category": "base"
+      },
+      "required": false,
+      "requiredReason": "default-nullable",
+      "transform": {
+        "type": "scalar"
+      },
+      "locs": [
+        {
+          "a": 145,
+          "b": 154
+        }
+      ]
+    }
+  ],
+  "columns": [
+    {
+      "name": "belongs",
+      "dbType": {
+        "schema": "pg_catalog",
+        "name": "bool",
+        "array": false,
+        "category": "base"
+      },
+      "nullable": true,
+      "nullableReason": "expression"
+    }
+  ],
+  "status": {
+    "state": "ok"
+  },
+  "generated": []
+}
