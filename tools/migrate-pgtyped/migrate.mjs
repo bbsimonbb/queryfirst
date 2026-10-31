@@ -197,11 +197,20 @@ function rewriteSource(text, file, splitMap, aliases) {
           manual.push({ specifier: g.spec, reason: `symbol "${bad}" is not exported by the generated module` });
           rep = whole;
         } else {
-          // Shared helper types (Json, DateOrString, ...) are identical in every split file: keep them with the
-          // first query group of this import, or the split's first query when the import has only shared types.
-          const firstKey = groups.size ? groups.keys().next().value : split.firstName;
-          const firstMems = new Set([...(groups.get(firstKey) ?? []), ...shared]);
-          groups.set(firstKey, members.filter((x) => firstMems.has(x)));
+          // Shared helper types (Json, DateOrString, ...) are only emitted by the split files whose query uses
+          // them: send each to the first query group of this import that uses it, else to the split's first query
+          // that uses it (a new import line). Unknown usage falls back to the first group (or the first query).
+          const fallback = groups.size ? groups.keys().next().value : split.firstName;
+          const assigned = new Map();
+          for (const mem of shared) {
+            const name = mem.replace(/^type\s+/, "").split(/\s+as\s+/)[0].trim();
+            const users = split.helperUsers.get(name) ?? [];
+            assigned.set(mem, [...groups.keys()].find((k) => users.includes(k)) ?? users[0] ?? fallback);
+          }
+          for (const qn of new Set(assigned.values())) {
+            const mems = new Set([...(groups.get(qn) ?? []), ...[...assigned].filter(([, k]) => k === qn).map(([x]) => x)]);
+            groups.set(qn, members.filter((x) => mems.has(x)));
+          }
           const multi = g.raw.includes("\n");
           const indent = (g.raw.match(/\n([ \t]+)\S/) ?? [])[1] ?? "  ";
           const comma = /,\s*$/.test(g.raw);
@@ -385,15 +394,26 @@ export function planMigration(project, opts = {}) {
       querySymbols.set(t.name, syms);
       for (const s of syms) symbols.set(s, t.name);
     }
+    const genText = readFileSync(generated, "utf8");
     const exported = [
-      ...readFileSync(generated, "utf8").matchAll(/^export\s+(?:declare\s+)?(?:type|interface|const|enum|class|function|let|var)\s+([\w$]+)/gm),
+      ...genText.matchAll(/^export\s+(?:declare\s+)?(?:type|interface|const|enum|class|function|let|var)\s+([\w$]+)/gm),
     ].map((x) => x[1]);
     const shared = new Set(exported.filter((n) => !symbols.has(n)));
+    // Which queries use each shared helper, in file order: pgtyped writes one block per query, starting
+    // at its `/** '<Pascal>' parameters type */` comment.
+    const helperUsers = new Map([...shared].map((h) => [h, []]));
+    const starts = [...genText.matchAll(/^\/\*\* '[\w$]+' parameters type \*\/\r?$/gm)].map((x) => x.index);
+    for (const [i, at] of starts.entries()) {
+      const block = genText.slice(at, starts[i + 1] ?? genText.length);
+      const qn = (/export const ([\w$]+) = new PreparedQuery/.exec(block) ?? [])[1];
+      if (!qn || !names.has(qn)) continue;
+      for (const h of shared) if (new RegExp(`\\b${h.replace(/\$/g, "\\$")}\\b`).test(block)) helperUsers.get(h).push(qn);
+    }
     const key = norm(stem);
     if (splitMap.has(key)) {
       conflicts.push(`${file}: collides with ${splitMap.get(key).file} (same name, different extension; both generate ${basename(generated)})`);
     }
-    splitMap.set(key, { file, symbols, querySymbols, shared, names: targets.map((t) => t.name), firstName: targets[0].name });
+    splitMap.set(key, { file, symbols, querySymbols, shared, helperUsers, names: targets.map((t) => t.name), firstName: targets[0].name });
     splits.push({ file, targets });
   }
 

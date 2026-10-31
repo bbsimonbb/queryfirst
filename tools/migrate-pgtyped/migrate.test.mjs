@@ -197,6 +197,48 @@ test("shared type listed after the query symbol of a later group", () => {
     'import { getUser } from "./q/get-user.query";\n');
 });
 
+test("shared helper types go to a query whose generated block uses them (found in simplyfirst acceptance)", () => {
+  const root = fixture();
+  // Real pgtyped layout: helpers in the head, one block per query; only the queries that use a
+  // helper re-export it once split, so Json must follow listUsers and DateOrString deleteUser.
+  put(root, "src/q/user.queries.ts", [
+    '/** Types generated for queries found in "src/q/user.psql" */',
+    "export type Json = null | boolean;",
+    "",
+    "export type DateOrString = Date | string;",
+    "",
+    "/** 'GetUser' parameters type */",
+    "export interface IGetUserParams { id?: number | null | void; }",
+    "export const getUser = new PreparedQuery<IGetUserParams,IGetUserResult>(getUserIR);",
+    "",
+    "/** 'ListUsers' parameters type */",
+    "export type IListUsersParams = void;",
+    "export interface IListUsersResult { data: Json | null; }",
+    "export const listUsers = new PreparedQuery<IListUsersParams,IListUsersResult>(listUsersIR);",
+    "",
+    "/** 'DeleteUser' parameters type */",
+    "export interface IDeleteUserParams { at?: DateOrString | null | void; }",
+    "export const deleteUser = new PreparedQuery<IDeleteUserParams,IDeleteUserResult>(deleteUserIR);",
+    "",
+  ].join("\n"));
+  put(root, "src/s3.ts", [
+    'import { Json, getUser, listUsers } from "./q/user.queries";',
+    'import { getUser as g, DateOrString } from "./q/user.queries";',
+    'import type { Json as J } from "./q/user.queries";',
+    "",
+  ].join("\n"));
+  const r = run(root);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(join(root, "src/s3.ts"), "utf8"), [
+    'import { getUser } from "./q/get-user.query";',
+    'import { Json, listUsers } from "./q/list-users.query";',
+    'import { getUser as g } from "./q/get-user.query";',
+    'import { DateOrString } from "./q/delete-user.query";',
+    'import type { Json as J } from "./q/list-users.query";',
+    "",
+  ].join("\n"));
+});
+
 test("vi.mock of a split module becomes one mock per target module", () => {
   const root = fixture({ eol: "\r\n" });
   put(root, "src/m.test.ts",
