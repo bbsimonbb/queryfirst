@@ -14,6 +14,7 @@ pub struct CatalogColumn {
     pub schema: String,
     pub table: String,
     pub name: String,
+    /// `NOT NULL` that holds for every row: validated, and not on a foreign table.
     pub not_null: bool,
     /// Has a default, or is an identity or generated column.
     pub has_default: bool,
@@ -62,7 +63,13 @@ const ENUMS_SQL: &str = "SELECT enumtypid, enumlabel::text FROM pg_catalog.pg_en
 
 const COLUMNS_SQL: &str = "\
 SELECT c.oid, n.nspname::text, c.relname::text, c.relkind::text,
-       a.attnum, a.attname::text, a.atttypid, a.atttypmod, a.attnotnull,
+       a.attnum, a.attname::text, a.atttypid, a.atttypmod,
+       -- Only a NOT NULL that holds for every row: PG 18 keeps attnotnull for a NOT VALID
+       -- constraint, and a foreign table's NOT NULL is not enforced.
+       (a.attnotnull AND c.relkind <> 'f'
+        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k
+                        WHERE k.conrelid = a.attrelid AND k.contype = 'n'
+                          AND NOT k.convalidated AND a.attnum = ANY (k.conkey))) AS not_null,
        (EXISTS (SELECT 1 FROM pg_catalog.pg_attrdef d
                 WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum)
         OR a.attidentity <> '' OR a.attgenerated <> '') AS has_default
