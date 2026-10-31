@@ -167,7 +167,16 @@ impl TypeAllocator {
             .join("\n")
     }
 
-    fn register(&mut self, typ: &TsType) -> String {
+    /// Register pgtyped's `PreparedQuery` import first, as `generateDeclarationFile` does.
+    pub(crate) fn register_runtime_import(&mut self) {
+        self.register(&TsType::Import {
+            name: "PreparedQuery".into(),
+            from: "@pgtyped/runtime".into(),
+            alias_of: None,
+        });
+    }
+
+    pub(crate) fn register(&mut self, typ: &TsType) -> String {
         if !self.types.iter().any(|t| t.name() == typ.name()) {
             self.types.push(typ.clone());
         }
@@ -346,7 +355,7 @@ fn pascal_word(w: &str, index: usize) -> String {
     format!("{}{}", first.to_ascii_uppercase(), cs.as_str())
 }
 
-fn pascal_case(s: &str) -> String {
+pub(crate) fn pascal_case(s: &str) -> String {
     words(s)
         .iter()
         .enumerate()
