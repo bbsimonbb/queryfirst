@@ -135,10 +135,7 @@ pub fn analyze_columns(
     let Some(node) = raw.stmt.as_ref().and_then(|s| s.node.as_ref()) else {
         return gave_up;
     };
-    let mut analyzer = Analyzer {
-        cat,
-        ctes: Vec::new(),
-    };
+    let mut analyzer = Analyzer::new(cat);
     let Some(cols) = analyzer.statement(node) else {
         return gave_up;
     };
@@ -208,7 +205,7 @@ enum RelKind {
 }
 
 /// A range table entry visible in a `FROM` scope.
-struct Rel {
+pub(crate) struct Rel {
     /// The name references use: the alias, else the relation name; empty when it has neither.
     refname: String,
     /// The schema written in `FROM`, for `schema.table.column` references (unaliased only).
@@ -219,8 +216,8 @@ struct Rel {
 }
 
 #[derive(Default)]
-struct Scope {
-    rels: Vec<Rel>,
+pub(crate) struct Scope {
+    pub(crate) rels: Vec<Rel>,
     /// A `USING` or `NATURAL` join merges columns, so `*` is not the plain concatenation.
     merged: bool,
     /// A `RETURNING` list, where `old` and `new` are special (PG 18).
@@ -233,20 +230,20 @@ enum Lookup {
     Ambiguous,
 }
 
-struct Analyzer<'a> {
+pub(crate) struct Analyzer<'a> {
     cat: &'a dyn CatalogView,
     /// CTEs in scope, innermost last; `None` columns for those not analyzed (recursive).
     ctes: Vec<(String, Option<Vec<OutCol>>)>,
 }
 
-fn str_of(node: &pb::Node) -> Option<&str> {
+pub(crate) fn str_of(node: &pb::Node) -> Option<&str> {
     match &node.node {
         Some(NodeEnum::String(s)) => Some(&s.sval),
         _ => None,
     }
 }
 
-fn node_of(node: &Option<Box<pb::Node>>) -> Option<&NodeEnum> {
+pub(crate) fn node_of(node: &Option<Box<pb::Node>>) -> Option<&NodeEnum> {
     node.as_deref().and_then(|n| n.node.as_ref())
 }
 
@@ -308,7 +305,14 @@ const NULL_ON_EMPTY_AGGREGATES: &[&str] = &[
 const COMPARISONS: &[&str] = &["=", "<>", "<", ">", "<=", ">="];
 const ARITHMETIC: &[&str] = &["+", "-", "*", "/"];
 
-impl Analyzer<'_> {
+impl<'a> Analyzer<'a> {
+    pub(crate) fn new(cat: &'a dyn CatalogView) -> Self {
+        Analyzer {
+            cat,
+            ctes: Vec::new(),
+        }
+    }
+
     /// Output columns of a statement; `None` when they cannot be determined.
     fn statement(&mut self, node: &NodeEnum) -> Option<Vec<OutCol>> {
         match node {
@@ -336,7 +340,7 @@ impl Analyzer<'_> {
     }
 
     /// Run `body` with the CTEs of `with` in scope.
-    fn with_ctes<T>(
+    pub(crate) fn with_ctes<T>(
         &mut self,
         with: Option<&pb::WithClause>,
         body: impl FnOnce(&mut Self) -> Option<T>,
@@ -433,27 +437,14 @@ impl Analyzer<'_> {
             if !ret.options.is_empty() {
                 return None;
             }
-            let schema = (!relation.schemaname.is_empty()).then(|| relation.schemaname.clone());
-            let target = Rel {
-                refname: match &relation.alias {
-                    Some(alias) => alias.aliasname.clone(),
-                    None => relation.relname.clone(),
-                },
-                schema: relation.alias.is_none().then(|| schema.clone()).flatten(),
-                kind: RelKind::Table {
-                    schema,
-                    name: relation.relname.clone(),
-                },
-                nullable: false,
-            };
             let mut scope = a.scope_of(from);
-            scope.rels.insert(0, target);
+            scope.rels.insert(0, target_rel(relation));
             scope.returning = true;
             a.targets(&ret.exprs, &scope)
         })
     }
 
-    fn scope_of(&mut self, items: &[pb::Node]) -> Scope {
+    pub(crate) fn scope_of(&mut self, items: &[pb::Node]) -> Scope {
         let mut scope = Scope::default();
         for item in items {
             self.add_from_item(item, &mut scope.rels, &mut scope.merged);
@@ -669,7 +660,7 @@ impl Analyzer<'_> {
         Lookup::Found(if rel.nullable { OUTER } else { found })
     }
 
-    fn column_ref(&self, cr: &pb::ColumnRef, scope: &Scope) -> ColumnNullability {
+    pub(crate) fn column_ref(&self, cr: &pb::ColumnRef, scope: &Scope) -> ColumnNullability {
         let Some(fields) = cr.fields.iter().map(str_of).collect::<Option<Vec<_>>>() else {
             return GAVE_UP;
         };
@@ -820,6 +811,24 @@ impl Analyzer<'_> {
             );
         }
         GAVE_UP
+    }
+}
+
+/// The target table of an `INSERT` / `UPDATE` / `DELETE`: a real row of the table, never on the
+/// nullable side of a join.
+pub(crate) fn target_rel(relation: &pb::RangeVar) -> Rel {
+    let schema = (!relation.schemaname.is_empty()).then(|| relation.schemaname.clone());
+    Rel {
+        refname: match &relation.alias {
+            Some(alias) => alias.aliasname.clone(),
+            None => relation.relname.clone(),
+        },
+        schema: relation.alias.is_none().then(|| schema.clone()).flatten(),
+        kind: RelKind::Table {
+            schema,
+            name: relation.relname.clone(),
+        },
+        nullable: false,
     }
 }
 

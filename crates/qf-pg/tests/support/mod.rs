@@ -4,8 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
-use qf_meta::{NullableReason, TypeCategory, TypeRef};
-use qf_pg::{CatalogColumn, CatalogView, ColumnNullability};
+use qf_meta::{NullableReason, RequiredReason, TypeCategory, TypeRef};
+use qf_pg::{CatalogColumn, CatalogView, ColumnNullability, ParamRequirement};
 
 /// One `.sql` fixture: its first line is `-- expect: name=notnull other=nullable:outer-join …`.
 #[derive(Debug, Clone)]
@@ -18,6 +18,28 @@ pub struct Fixture {
 }
 
 pub fn fixtures(dir: &str) -> Vec<Fixture> {
+    fixture_files(dir)
+        .into_iter()
+        .map(|f| {
+            let expect = parse_expect(&f.spec).unwrap_or_else(|e| panic!("{}: {e}", f.name));
+            Fixture {
+                name: f.name,
+                sql: f.sql,
+                expect,
+            }
+        })
+        .collect()
+}
+
+/// A fixture file before its expectation is parsed: the text after `-- expect:` on the first
+/// line, and the whole file (first line included).
+pub struct FixtureFile {
+    pub name: String,
+    pub spec: String,
+    pub sql: String,
+}
+
+pub fn fixture_files(dir: &str) -> Vec<FixtureFile> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join(dir);
@@ -36,9 +58,9 @@ pub fn fixtures(dir: &str) -> Vec<Fixture> {
             let first = sql.lines().next().unwrap_or_default();
             let spec = first
                 .strip_prefix("-- expect:")
-                .unwrap_or_else(|| panic!("{name}: first line must be `-- expect: …`"));
-            let expect = parse_expect(spec).unwrap_or_else(|e| panic!("{name}: {e}"));
-            Fixture { name, sql, expect }
+                .unwrap_or_else(|| panic!("{name}: first line must be `-- expect: …`"))
+                .to_string();
+            FixtureFile { name, spec, sql }
         })
         .collect()
 }
@@ -116,6 +138,17 @@ pub fn stripped(name: &str) -> &str {
 /// (schema, table, [(column, not null)]).
 type FakeTable = (&'static str, &'static str, Vec<(&'static str, bool)>);
 
+/// Columns with a default (`serial` included), as in `tests/fixtures/schema.sql`.
+const DEFAULTS: &[(&str, &str)] = &[
+    ("customers", "id"),
+    ("customers", "access"),
+    ("customers", "created_at"),
+    ("addresses", "id"),
+    ("invoices", "id"),
+    ("invoices", "total"),
+    ("invoices", "issued_on"),
+];
+
 pub struct FakeCatalog {
     tables: Vec<FakeTable>,
 }
@@ -179,7 +212,7 @@ impl FakeCatalog {
             table: table.to_string(),
             name: cols[c].0.to_string(),
             not_null: cols[c].1,
-            has_default: false,
+            has_default: DEFAULTS.contains(&(*table, cols[c].0)),
             db_type: dummy_type(),
         }
     }
@@ -232,3 +265,100 @@ pub fn dummy_type() -> TypeRef {
 
 #[cfg(feature = "db-tests")]
 pub mod db;
+
+/// One `tests/required/` fixture, lexed: a query file (header optional) after a first line
+/// `-- expect: <param>=<state>[:<reason>] …`, one item per `$n` in `param_order` order (pick
+/// keys as `p.key`). `required` needs a reason; `nullable` alone means `default-nullable`.
+pub struct RequiredFixture {
+    pub name: String,
+    pub lexed: qf_sqlfile::LexedQuery,
+    pub expect: Vec<(String, ParamRequirement)>,
+}
+
+pub fn required_fixtures() -> Vec<RequiredFixture> {
+    fixture_files("required")
+        .into_iter()
+        .map(|f| {
+            let expect =
+                parse_required_expect(&f.spec).unwrap_or_else(|e| panic!("{}: {e}", f.name));
+            // The `-- expect:` line goes, so that a header comment can open the query file.
+            let source = f.sql.split_once('\n').map_or("", |(_, rest)| rest);
+            let path = format!("{}.sql", f.name);
+            let q = qf_sqlfile::parse_query_file(Path::new(&path), &qf_sqlfile::normalise(source))
+                .unwrap_or_else(|e| panic!("{}: {e:?}", f.name));
+            let lexed = qf_sqlfile::lex_params(&q).unwrap_or_else(|e| panic!("{}: {e:?}", f.name));
+            let names: Vec<&str> = expect.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(lexed.param_order, names, "{}: param order", f.name);
+            RequiredFixture {
+                name: f.name,
+                lexed,
+                expect,
+            }
+        })
+        .collect()
+}
+
+pub fn parse_required_expect(spec: &str) -> Result<Vec<(String, ParamRequirement)>, String> {
+    let mut out = Vec::new();
+    for item in spec.split_whitespace() {
+        let (name, value) = item
+            .split_once('=')
+            .ok_or_else(|| format!("bad item `{item}`"))?;
+        let (state, reason) = match value.split_once(':') {
+            Some((s, r)) => (s, Some(r)),
+            None => (value, None),
+        };
+        let required = match state {
+            "required" => true,
+            "nullable" => false,
+            _ => return Err(format!("bad state in `{item}`")),
+        };
+        let reason = match (required, reason) {
+            (true, None) => return Err(format!("`{item}`: required needs a reason")),
+            (false, None) => RequiredReason::DefaultNullable,
+            (_, Some(r)) => {
+                required_reason_from(r).ok_or_else(|| format!("bad reason in `{item}`"))?
+            }
+        };
+        out.push((name.to_string(), ParamRequirement { required, reason }));
+    }
+    Ok(out)
+}
+
+fn required_reason_from(s: &str) -> Option<RequiredReason> {
+    Some(match s {
+        "annotation" => RequiredReason::Annotation,
+        "insert-notnull" => RequiredReason::InferredInsertNotnull,
+        "where-eq-notnull" => RequiredReason::InferredWhereEqNotnull,
+        "default-nullable" => RequiredReason::DefaultNullable,
+        _ => return None,
+    })
+}
+
+pub fn show_required(r: &ParamRequirement) -> String {
+    let reason = match r.reason {
+        RequiredReason::Annotation => "annotation",
+        RequiredReason::InferredInsertNotnull => "insert-notnull",
+        RequiredReason::InferredWhereEqNotnull => "where-eq-notnull",
+        RequiredReason::DefaultNullable => "default-nullable",
+    };
+    format!(
+        "{}:{reason}",
+        if r.required { "required" } else { "nullable" }
+    )
+}
+
+/// Compare one fixture's inferred requirements; mismatches are pushed to `failures`.
+pub fn check_required(f: &RequiredFixture, got: &[ParamRequirement], failures: &mut Vec<String>) {
+    assert_eq!(got.len(), f.expect.len(), "{}: count", f.name);
+    for ((name, want), got) in f.expect.iter().zip(got) {
+        if got != want {
+            failures.push(format!(
+                "{}: {name}: want {}, got {}",
+                f.name,
+                show_required(want),
+                show_required(got)
+            ));
+        }
+    }
+}
