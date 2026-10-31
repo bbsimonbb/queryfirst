@@ -85,3 +85,146 @@ async fn not_valid_not_null_is_not_trusted() {
     })
     .await;
 }
+
+async fn server_version(db: &support::db::Db) -> i32 {
+    db.admin
+        .query_one("SELECT current_setting('server_version_num')::int", &[])
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// `not_null` of `table.column` in a freshly loaded catalog.
+async fn not_null(db: &support::db::Db, table: &str, column: &str) -> bool {
+    let catalog = qf_pg::Catalog::load(&db.pool).await.unwrap();
+    let t = catalog
+        .table(Some(&db.schema), table)
+        .unwrap_or_else(|| panic!("table {table}"));
+    t.columns
+        .iter()
+        .find(|c| c.name == column)
+        .unwrap_or_else(|| panic!("column {table}.{column}"))
+        .not_null
+}
+
+/// A parent's NOT NULL is trusted when every descendant enforces it too.
+#[tokio::test]
+async fn inherited_not_null_is_trusted_when_descendants_agree() {
+    with_db(|db| async move {
+        let s = &db.schema;
+        db.admin
+            .batch_execute(&format!(
+                "CREATE TABLE {s}.p (a int NOT NULL, b int);
+                 CREATE TABLE {s}.ch () INHERITS ({s}.p);
+                 CREATE TABLE {s}.gch () INHERITS ({s}.ch);
+                 CREATE TABLE {s}.pt (a int NOT NULL, k int NOT NULL) PARTITION BY LIST (k);
+                 CREATE TABLE {s}.pt1 PARTITION OF {s}.pt FOR VALUES IN (1);"
+            ))
+            .await
+            .unwrap();
+        assert!(not_null(&db, "p", "a").await);
+        assert!(!not_null(&db, "p", "b").await);
+        assert!(not_null(&db, "ch", "a").await);
+        assert!(not_null(&db, "pt", "a").await);
+        assert!(not_null(&db, "pt1", "a").await);
+    })
+    .await;
+}
+
+/// Traditional inheritance: where Postgres lets a child drop an inherited NOT NULL, the parent's
+/// NOT NULL no longer holds for `SELECT … FROM parent`.
+#[tokio::test]
+async fn child_dropping_not_null_untrusts_parent() {
+    with_db(|db| async move {
+        let s = &db.schema;
+        db.admin
+            .batch_execute(&format!(
+                "CREATE TABLE {s}.p (a int NOT NULL);
+                 CREATE TABLE {s}.ch () INHERITS ({s}.p);
+                 CREATE TABLE {s}.gch () INHERITS ({s}.ch);"
+            ))
+            .await
+            .unwrap();
+        // Through a grandchild, to exercise the recursive descent.
+        let dropped = db
+            .admin
+            .batch_execute(&format!("ALTER TABLE {s}.gch ALTER COLUMN a DROP NOT NULL"))
+            .await;
+        match dropped {
+            Ok(()) => {
+                assert!(!not_null(&db, "gch", "a").await);
+                assert!(
+                    !not_null(&db, "ch", "a").await,
+                    "child of a nullable grandchild"
+                );
+                assert!(
+                    !not_null(&db, "p", "a").await,
+                    "ancestor of a nullable grandchild"
+                );
+            }
+            // Versions that forbid it ("column is marked NOT NULL in parent table"): the
+            // parent's NOT NULL keeps holding.
+            Err(e) => {
+                assert!(e.as_db_error().is_some(), "{e:?}");
+                assert!(not_null(&db, "p", "a").await);
+            }
+        }
+    })
+    .await;
+}
+
+/// PG 18: `NOT NULL NO INHERIT` on a parent leaves children nullable.
+#[tokio::test]
+async fn no_inherit_not_null_untrusts_parent() {
+    with_db(|db| async move {
+        if server_version(&db).await < 180000 {
+            return; // NO INHERIT not-null constraints do not exist before PG 18.
+        }
+        let s = &db.schema;
+        db.admin
+            .batch_execute(&format!(
+                "CREATE TABLE {s}.p (a int NOT NULL NO INHERIT);
+                 CREATE TABLE {s}.ch () INHERITS ({s}.p);
+                 INSERT INTO {s}.ch VALUES (NULL);"
+            ))
+            .await
+            .unwrap();
+        assert!(!not_null(&db, "ch", "a").await);
+        assert!(!not_null(&db, "p", "a").await);
+    })
+    .await;
+}
+
+/// A foreign-table child or partition: its NOT NULL is not enforced, so neither it nor its
+/// ancestors are trusted. The wrapper has no handler (nothing is ever read through it); FDW and
+/// server are database-wide, so they are named after the temp schema and dropped here.
+#[tokio::test]
+async fn foreign_descendant_untrusts_parent() {
+    with_db(|db| async move {
+        let s = &db.schema;
+        db.admin
+            .batch_execute(&format!(
+                "CREATE FOREIGN DATA WRAPPER {s}_fdw;
+                 CREATE SERVER {s}_srv FOREIGN DATA WRAPPER {s}_fdw;
+                 CREATE TABLE {s}.p (a int NOT NULL);
+                 CREATE FOREIGN TABLE {s}.fch () INHERITS ({s}.p) SERVER {s}_srv;
+                 CREATE TABLE {s}.pt (a int NOT NULL, k int NOT NULL) PARTITION BY LIST (k);
+                 CREATE FOREIGN TABLE {s}.fpt PARTITION OF {s}.pt FOR VALUES IN (1)
+                     SERVER {s}_srv;"
+            ))
+            .await
+            .unwrap();
+        let got = (
+            not_null(&db, "fch", "a").await,
+            not_null(&db, "p", "a").await,
+            not_null(&db, "fpt", "a").await,
+            not_null(&db, "pt", "a").await,
+        );
+        db.admin
+            .batch_execute(&format!("DROP FOREIGN DATA WRAPPER {s}_fdw CASCADE"))
+            .await
+            .unwrap();
+        assert_eq!(got, (false, false, false, false));
+    })
+    .await;
+}

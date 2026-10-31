@@ -14,7 +14,7 @@ pub struct CatalogColumn {
     pub schema: String,
     pub table: String,
     pub name: String,
-    /// `NOT NULL` that holds for every row: validated, and not on a foreign table.
+    /// `NOT NULL` that holds for every row a scan returns (see `COLUMNS_SQL`).
     pub not_null: bool,
     /// Has a default, or is an identity or generated column.
     pub has_default: bool,
@@ -61,15 +61,45 @@ JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace";
 
 const ENUMS_SQL: &str = "SELECT enumtypid, enumlabel::text FROM pg_catalog.pg_enum";
 
+/// `not_null` is a NOT NULL that holds for every row a scan of the relation can return:
+/// - not NOT VALID (PG 18 keeps `attnotnull` for one) and not NO INHERIT (PG 18);
+/// - not on a foreign table (its NOT NULL is not enforced);
+/// - and the same holds in every descendant (inheritance children and partitions, recursively),
+///   since `SELECT … FROM parent` scans them too.
 const COLUMNS_SQL: &str = "\
+WITH RECURSIVE tree (ancestor, descendant) AS (
+    SELECT i.inhparent, i.inhrelid FROM pg_catalog.pg_inherits i
+    UNION
+    SELECT t.ancestor, i.inhrelid
+    FROM tree t JOIN pg_catalog.pg_inherits i ON i.inhparent = t.descendant
+),
+-- Columns of descendant relations whose own rows may hold NULL.
+weak (relid, attname) AS (
+    SELECT a.attrelid, a.attname
+    FROM pg_catalog.pg_attribute a
+    JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+    WHERE a.attnum > 0 AND NOT a.attisdropped
+      AND a.attrelid IN (SELECT descendant FROM tree)
+      AND (NOT a.attnotnull OR c.relkind = 'f'
+           OR EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k
+                      WHERE k.conrelid = a.attrelid AND k.contype = 'n'
+                        AND (NOT k.convalidated OR k.connoinherit)
+                        AND a.attnum = ANY (k.conkey)))
+),
+-- Ancestor columns (matched by name, as inheritance does) with a weak descendant column.
+weak_below (relid, attname) AS (
+    SELECT DISTINCT t.ancestor, w.attname
+    FROM tree t JOIN weak w ON w.relid = t.descendant
+)
 SELECT c.oid, n.nspname::text, c.relname::text, c.relkind::text,
        a.attnum, a.attname::text, a.atttypid, a.atttypmod,
-       -- Only a NOT NULL that holds for every row: PG 18 keeps attnotnull for a NOT VALID
-       -- constraint, and a foreign table's NOT NULL is not enforced.
        (a.attnotnull AND c.relkind <> 'f'
         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k
                         WHERE k.conrelid = a.attrelid AND k.contype = 'n'
-                          AND NOT k.convalidated AND a.attnum = ANY (k.conkey))) AS not_null,
+                          AND (NOT k.convalidated OR k.connoinherit)
+                          AND a.attnum = ANY (k.conkey))
+        AND NOT EXISTS (SELECT 1 FROM weak_below b
+                        WHERE b.relid = a.attrelid AND b.attname = a.attname)) AS not_null,
        (EXISTS (SELECT 1 FROM pg_catalog.pg_attrdef d
                 WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum)
         OR a.attidentity <> '' OR a.attgenerated <> '') AS has_default
