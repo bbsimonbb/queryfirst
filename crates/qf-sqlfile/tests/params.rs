@@ -166,3 +166,65 @@ fn range_and_slices() {
     let l = lex("SELECT a[1:2], b[1:n]");
     assert_eq!(names(&l), ["n"]);
 }
+
+#[test]
+fn standard_conforming_strings() {
+    // A backslash does not escape in a plain string.
+    assert!(lex(r"SELECT 'C:\'").uses.is_empty());
+    assert_eq!(names(&lex(r"SELECT 'a\' , :x")), ["x"]);
+    assert_eq!(
+        names(&lex(
+            r"SELECT * FROM t WHERE a LIKE 'a\' AND x = :x AND y = 'b'"
+        )),
+        ["x"]
+    );
+    // `''` escapes a quote.
+    assert_eq!(names(&lex(r"SELECT 'it''s :no', :x")), ["x"]);
+    // In E'...' strings it does, in either case of E.
+    assert!(lex(r"SELECT E'it\'s :x'").uses.is_empty());
+    assert!(lex(r"SELECT e'a\\' || ':y'").uses.is_empty());
+    // An identifier ending in E is not an E-string prefix.
+    assert_eq!(names(&lex(r"SELECT name'a\' , :x")), ["x"]);
+}
+
+/// Postgres error positions are 1-based character counts.
+fn pg_pos(db: &str, needle: &str) -> u32 {
+    let byte = db.find(needle).unwrap();
+    db[..byte].chars().count() as u32 + 1
+}
+
+#[test]
+fn crlf_same_as_lf() {
+    let crlf = ADDRESS_PSQL.replace('\n', "\r\n");
+    let (a, b) = (query(ADDRESS_PSQL), query(&crlf));
+    let (la, lb) = (lex_params(&a).unwrap(), lex_params(&b).unwrap());
+    let ir = |q: &QueryFile, l: &LexedQuery| {
+        serde_json::to_string(&pgtyped_ir(q, l, &|_| false)).unwrap()
+    };
+    assert_eq!(ir(&a, &la), ADDRESS_IR);
+    assert_eq!(ir(&b, &lb), ADDRESS_IR);
+    assert_eq!(la.db_statement, lb.db_statement);
+    assert_eq!(la.uses, lb.uses);
+    assert_eq!(la.param_order, lb.param_order);
+    for n in ["$1", "$2", "FROM", "inner"] {
+        let p = pg_pos(&la.db_statement, n);
+        assert_eq!(
+            la.map.db_char_pos_to_source(p),
+            lb.map.db_char_pos_to_source(p)
+        );
+    }
+    assert_eq!(
+        la.map.db_char_pos_to_source(pg_pos(&la.db_statement, "$2")),
+        (5, 47)
+    );
+}
+
+#[test]
+fn sourcemap_after_accented_text() {
+    let l = lex("/* @name q */\nSELECT 'é', :a, :b");
+    assert_eq!(l.db_statement, "SELECT 'é', $1, $2");
+    let p = pg_pos(&l.db_statement, "$2");
+    assert_eq!(p, 17);
+    assert_eq!(l.map.db_char_pos_to_source(p), (2, 17));
+    assert_eq!(l.uses[1].loc, Loc { a: 16, b: 17 });
+}

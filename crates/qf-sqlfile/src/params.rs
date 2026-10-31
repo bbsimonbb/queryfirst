@@ -139,16 +139,24 @@ fn scan(body: &str, pos: &Positions) -> Result<Scan, Vec<Diagnostic>> {
                 s.comments.push(Span { start, end: i });
             }
             b'\'' => {
-                // pgtyped: QUOT (QUOT | .*? ~[\\] QUOT): a quote after a backslash does not close.
-                if next == Some(b'\'') {
-                    i += 2;
-                } else {
-                    let close = (i + 2..b.len()).find(|&j| b[j] == b'\'' && b[j - 1] != b'\\');
-                    let Some(j) = close else {
-                        return Err(err(i, "Unterminated string literal", "Close it with `'`"));
-                    };
-                    i = j + 1;
+                // Standard-conforming strings: `''` escapes a quote. Only in E'...' strings (the
+                // E not ending a longer identifier) does a backslash escape the next char.
+                let escapes = i >= 1
+                    && matches!(b[i - 1], b'E' | b'e')
+                    && (i < 2 || !(is_word(b[i - 2]) || b[i - 2] == b'$'));
+                let mut j = i + 1;
+                loop {
+                    match b.get(j) {
+                        None => {
+                            return Err(err(i, "Unterminated string literal", "Close it with `'`"));
+                        }
+                        Some(b'\\') if escapes => j += 2,
+                        Some(b'\'') if b.get(j + 1) == Some(&b'\'') => j += 2,
+                        Some(b'\'') => break,
+                        Some(_) => j += 1,
+                    }
                 }
+                i = j + 1;
             }
             b'"' => {
                 let Some(e) = body[i + 1..].find('"') else {
