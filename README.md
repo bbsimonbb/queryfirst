@@ -75,6 +75,33 @@ When a query breaks, `generate` reports it, records it in the meta file, and kee
 types in the wrapper plus one deliberate compile error carrying the message, so `tsc` fails once,
 in the generated file, with the real reason.
 
+### Watching for changes
+
+`qf` has no watch mode of its own: every run is one-shot, which is what agents and CI want.
+To regenerate a query whenever you save it, put a file watcher in front of `qf generate`.
+[chokidar-cli](https://www.npmjs.com/package/chokidar-cli) does it in one line:
+
+```sh
+npm install -D chokidar-cli
+```
+
+```json
+"scripts": {
+  "qf:watch": "chokidar \"app/**/*.*sql\" -c \"qf generate \\\"{path}\\\"\""
+}
+```
+
+- Use the same glob as `include` in `queryfirst.json`.
+- Keep the quotes around `{path}`: query folders such as `app/orders/[id]/(queries)/` break
+  in a shell otherwise.
+- Each save describes only that query, so it takes about a second.
+- The watcher also fires when a file is deleted. `qf generate` then reports the missing path,
+  and the next whole-project `qf generate` removes that query's outputs.
+- If the database sits behind a tunnel or needs environment variables, put whatever opens the
+  tunnel and loads the variables in front of `chokidar`, as you do for `qf generate`. The tunnel
+  then stays open for as long as the watcher runs. For example:
+  `"qf:watch": "node scripts/with-tunnel.mjs env-cmd chokidar \"app/**/*.*sql\" -c \"qf generate \\\"{path}\\\"\""`.
+
 ## Connection
 
 The connection is never stored in the config, and connection details can live where Postgres
