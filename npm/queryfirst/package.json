@@ -1,0 +1,29 @@
+{
+  "name": "queryfirst",
+  "version": "0.1.0",
+  "description": "Queryfirst: SQL-first code generation. Write .sql files, get typed code.",
+  "license": "MIT",
+  "bin": {
+    "qf": "bin/qf.js",
+    "queryfirst": "bin/qf.js"
+  },
+  "files": [
+    "bin",
+    "queryfirst.schema.json",
+    "qf-meta.v1.schema.json",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "queryfirst-win32-x64": "0.1.0",
+    "queryfirst-linux-x64": "0.1.0",
+    "queryfirst-linux-arm64": "0.1.0",
+    "queryfirst-darwin-x64": "0.1.0",
+    "queryfirst-darwin-arm64": "0.1.0"
+  }
+}

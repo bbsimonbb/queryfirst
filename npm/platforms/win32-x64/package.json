@@ -1,0 +1,16 @@
+{
+  "name": "queryfirst-win32-x64",
+  "version": "0.1.0",
+  "description": "Queryfirst (qf) native binary for win32-x64",
+  "license": "MIT",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin"
+  ],
+  "preferUnplugged": true
+}

@@ -1,0 +1,168 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.platform }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux-x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            zigbuild: true
+          - platform: linux-arm64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            zigbuild: true
+          - platform: darwin-x64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+          - platform: darwin-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - platform: win32-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Check tag matches Cargo.toml version
+        shell: bash
+        run: |
+          cargo_version=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml)
+          if [ "v${cargo_version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version v${cargo_version}" >&2
+            exit 1
+          fi
+      # pg_query's bindgen needs libclang (same setup as ci.yml)
+      - name: MSVC environment (windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Locate LLVM (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
+      - name: Install libclang and musl tooling (linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang musl-tools
+      - name: Install zig and cargo-zigbuild (linux)
+        if: matrix.zigbuild
+        run: |
+          python3 -m pip install --user ziglang
+          cargo install cargo-zigbuild --locked
+      - name: Build (zigbuild, static musl)
+        if: matrix.zigbuild
+        run: cargo zigbuild --release -p queryfirst --bin qf --target ${{ matrix.target }}
+      - name: Build
+        if: ${{ !matrix.zigbuild }}
+        run: cargo build --release -p queryfirst --bin qf --target ${{ matrix.target }}
+      - name: Collect binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ "${{ matrix.platform }}" = "win32-x64" ]; then
+            cp target/${{ matrix.target }}/release/qf.exe dist/qf-${{ matrix.platform }}.exe
+          else
+            cp target/${{ matrix.target }}/release/qf dist/qf-${{ matrix.platform }}
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qf-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: binaries
+          pattern: qf-*
+          merge-multiple: true
+      - name: Create release and attach binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" binaries/* \
+            --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --generate-notes
+
+  stage-npm:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          path: binaries
+          pattern: qf-*
+          merge-multiple: true
+      - name: Test the shim
+        run: npm test --prefix npm/queryfirst
+      - name: Stage npm packages
+        run: node scripts/stage-npm.mjs --out target/npm --binaries binaries
+      - name: Stage queryfirst-runtime (stamp version)
+        run: |
+          version=$(node -e "console.log(require('./target/npm/queryfirst/package.json').version)")
+          mkdir -p target/npm
+          cp -r npm/queryfirst-runtime target/npm/queryfirst-runtime
+          cd target/npm/queryfirst-runtime
+          npm version "$version" --no-git-tag-version --allow-same-version
+          npm ci
+          npm run build
+          rm -rf node_modules
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-packages
+          path: target/npm
+          if-no-files-found: error
+
+  publish:
+    name: publish to npm
+    needs: [github-release, stage-npm]
+    if: vars.NPM_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-packages
+          path: npm-packages
+      - name: Publish (platform packages first, then queryfirst)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -e
+          for dir in npm-packages/queryfirst-win32-x64 npm-packages/queryfirst-linux-x64 \
+                     npm-packages/queryfirst-linux-arm64 npm-packages/queryfirst-darwin-x64 \
+                     npm-packages/queryfirst-darwin-arm64 npm-packages/queryfirst-runtime \
+                     npm-packages/queryfirst; do
+            chmod +x "$dir"/bin/qf 2>/dev/null || true
+            (cd "$dir" && npm publish --access public)
+          done
