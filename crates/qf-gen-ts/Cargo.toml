@@ -6,3 +6,6 @@ license.workspace = true
 
 [dependencies]
 qf-meta.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

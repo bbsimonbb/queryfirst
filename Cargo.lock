@@ -1019,6 +1019,7 @@ name = "qf-gen-ts"
 version = "0.1.0"
 dependencies = [
  "qf-meta",
+ "serde_json",
 ]
 
 [[package]]
