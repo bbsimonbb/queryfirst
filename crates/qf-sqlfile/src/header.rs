@@ -168,6 +168,7 @@ pub fn parse_query_file(path: &Path, normalised: &str) -> Result<QueryFile, Vec<
     let from_annotation = name.is_some();
     let derived = name_from_path(path);
     let name = name.unwrap_or_else(|| derived.clone());
+    let (body_line, body_col) = cx.pos(body_offset);
     let mut diagnostics = Vec::new();
     if from_annotation && name != derived && !derived.is_empty() {
         let (line, col) = cx.pos(name_at);
@@ -196,6 +197,8 @@ pub fn parse_query_file(path: &Path, normalised: &str) -> Result<QueryFile, Vec<
         returns,
         body,
         body_offset,
+        body_line,
+        body_col,
         diagnostics,
     })
 }

@@ -17,3 +17,5 @@ qf-sqlfile = { path = "crates/qf-sqlfile" }
 qf-meta = { path = "crates/qf-meta" }
 qf-pg = { path = "crates/qf-pg" }
 qf-gen-ts = { path = "crates/qf-gen-ts" }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+regex = "1.13.1"
