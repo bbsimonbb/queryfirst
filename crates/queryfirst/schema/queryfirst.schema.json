@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Queryfirst project configuration (queryfirst.json)",
+  "description": "Lives at the project root. Every key is optional; unknown keys are an error (QF091). Connection strings are never stored here.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string", "description": "Path or URL of this schema, for editors." },
+    "provider": { "const": "postgres", "default": "postgres", "description": "The database. Only \"postgres\" for now." },
+    "include": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": ["**/*.psql", "**/*.sql"],
+      "description": "Globs of query files, matched against project-relative paths with \"/\" separators. \"*\" does not cross \"/\"; \"**\" spans directories."
+    },
+    "exclude": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": ["**/node_modules/**"],
+      "description": "Globs of paths to skip (e.g. \"sql-migration/**\"). Replaces the default when given."
+    },
+    "connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["env"],
+      "properties": {
+        "env": { "type": "string", "description": "Environment variable holding the dev database connection string. When set, DATABASE_URL and PG* are not used. `qf generate --db` overrides it." }
+      },
+      "description": "Without it, the connection comes from DATABASE_URL, else the standard PG* variables."
+    },
+    "pool": { "type": "integer", "minimum": 1, "default": 8, "description": "Connection pool size; describes run in parallel up to this many." },
+    "timestamp": { "const": "utc", "description": "How timestamp (without time zone) values are read (phase 2)." },
+    "test": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "connection": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "env": { "type": "string", "description": "Environment variable holding the target database connection string." },
+            "command": { "type": "string", "description": "Command whose standard output is the connection string." }
+          }
+        }
+      },
+      "description": "Settings for `qf test`."
+    },
+    "generators": {
+      "type": "array",
+      "default": [{ "name": "typescript" }],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": { "const": "typescript" },
+          "emitTemplate": { "type": "string", "default": "{{dir}}/{{name}}.query.ts", "description": "Output path; {{dir}} is the query file's project-relative directory, {{name}} its file name without extension." },
+          "typesOverrides": {
+            "type": "object",
+            "description": "Postgres type name to TypeScript type, as in pgtyped: a type for both directions, or one per direction.",
+            "additionalProperties": {
+              "oneOf": [
+                { "type": "string" },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "parameter": { "type": "string" },
+                    "return": { "type": "string" }
+                  }
+                }
+              ]
+            }
+          },
+          "camelCaseColumnNames": { "type": "boolean", "default": false, "description": "Camel-case result column names in the generated types." }
+        }
+      },
+      "description": "The generators to run. Replaces the default (one TypeScript generator) when given; an empty list writes meta files only."
+    }
+  }
+}

@@ -21,8 +21,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Generate TypeScript wrappers and metadata.
-    Generate,
+    /// Describe queries against the dev database; write meta files and wrappers.
+    Generate {
+        /// Files or directories to narrow the scope (taken literally, never globbed). None means
+        /// the whole project, which also removes the output of deleted queries.
+        paths: Vec<PathBuf>,
+        /// Connection string (overrides the configured environment variable).
+        #[arg(long, value_name = "CONN")]
+        db: Option<String>,
+    },
     /// Validate query files without writing output.
     Check,
     /// Run query tests against the database.
@@ -46,10 +53,11 @@ fn find_project_dir(start: &Path) -> PathBuf {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let _project = match cli.project {
+    let cwd = std::env::current_dir();
+    let project = match cli.project {
         Some(p) => p,
-        None => match std::env::current_dir() {
-            Ok(cwd) => find_project_dir(&cwd),
+        None => match &cwd {
+            Ok(cwd) => find_project_dir(cwd),
             Err(e) => {
                 eprintln!("qf: cannot read current directory: {e}");
                 return ExitCode::from(2);
@@ -57,7 +65,18 @@ fn main() -> ExitCode {
         },
     };
     let name = match cli.command {
-        Command::Generate => "generate",
+        Command::Generate { paths, db } => {
+            // Literal paths, relative to the current directory.
+            let paths: Vec<PathBuf> = paths
+                .into_iter()
+                .map(|p| match &cwd {
+                    Ok(cwd) if p.is_relative() => cwd.join(p),
+                    _ => p,
+                })
+                .collect();
+            let code = queryfirst::cmd::generate::run(&project, &paths, db.as_deref(), cli.json);
+            return ExitCode::from(code);
+        }
         Command::Check => "check",
         Command::Test => "test",
         Command::Bundle => "bundle",
