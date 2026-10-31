@@ -261,3 +261,78 @@ fn enum_lost_and_gained_two_differences() {
     assert_eq!((d[0].code, d[0].severity), ("QF047", Severity::Error));
     assert_eq!((d[1].code, d[1].severity), ("QF047", Severity::Warning));
 }
+
+fn pick(name: &str, keys: &[(&str, TypeRef)], spread: bool) -> Param {
+    let keys: Vec<PickKeyMeta> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, (k, t))| PickKeyMeta {
+            name: (*k).into(),
+            required: false,
+            db_index: i as u32 + 1,
+            db_type: t.clone(),
+        })
+        .collect();
+    Param {
+        db_type: ty("record"),
+        transform: if spread {
+            Transform::PickSpread { keys }
+        } else {
+            Transform::Pick { keys }
+        },
+        ..param(name, ty("record"))
+    }
+}
+
+#[test]
+fn pick_key_type_change_missing_added_error() {
+    let m = meta(
+        vec![pick(
+            "row",
+            &[
+                ("name", ty("text")),
+                ("age", ty("int4")),
+                ("gone", ty("int4")),
+            ],
+            false,
+        )],
+        vec![],
+    );
+    let actual = vec![pick(
+        "row",
+        &[
+            ("name", ty("text")),
+            ("age", ty("int8")),
+            ("extra", ty("bool")),
+        ],
+        false,
+    )];
+    let d = compare(&m, &actual, &[]);
+    let msgs: Vec<&str> = d.iter().map(|x| x.message.as_str()).collect();
+    assert_eq!(
+        msgs,
+        [
+            "getInvoice: parameter :row.age int4 → int8",
+            "getInvoice: parameter :row.gone removed",
+            "getInvoice: parameter :row.extra bool added",
+        ]
+    );
+    assert!(
+        d.iter()
+            .all(|x| x.code == "QF045" && x.severity == Severity::Error)
+    );
+}
+
+#[test]
+fn pick_spread_keys_compared_identical_is_empty() {
+    let keys = [("name", ty("text")), ("age", ty("int4"))];
+    let m = meta(vec![pick("rows", &keys, true)], vec![]);
+    assert_eq!(compare(&m, &[pick("rows", &keys, true)], &[]), vec![]);
+    let changed = [("name", ty("varchar")), ("age", ty("int4"))];
+    let d = compare(&m, &[pick("rows", &changed, true)], &[]);
+    assert_eq!(d.len(), 1);
+    assert_eq!(
+        d[0].message,
+        "getInvoice: parameter :rows.name text → varchar"
+    );
+}

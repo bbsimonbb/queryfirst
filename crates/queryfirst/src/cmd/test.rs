@@ -13,7 +13,8 @@
 //!   the session time zone is not UTC (see [`utc_timezone`]).
 //! * Exit 1 on any error-severity difference, or on any difference with `--strict`; exit 2 on a
 //!   connection, configuration or usage problem. The first connection error aborts the run.
-//! * Read-only: only describes (Parse/Describe, never Execute) and the catalog `SELECT`s.
+//! * Read-only: only describes (Parse/Describe, never Execute) and the catalog `SELECT`s, in
+//!   sessions opened with `default_transaction_read_only=on`.
 //! * The connection string is never printed: diagnostics name only `host:port`.
 
 use std::path::{Path, PathBuf};
@@ -21,8 +22,8 @@ use std::path::{Path, PathBuf};
 use futures_util::StreamExt;
 use qf_meta::{QueryMeta, Status, compare, manifest_from_json};
 use qf_pg::{
-    Catalog, ConnError, ConnSource, connect_pool, is_connection_error, resolve_connection,
-    to_diagnostic,
+    Catalog, ConnError, ConnSource, ResolvedConn, connect_pool, is_connection_error,
+    resolve_connection, to_diagnostic,
 };
 use qf_sqlfile::{Severity, lex_params};
 use serde_json::{Value, json};
@@ -165,6 +166,16 @@ pub fn test_connection_sources(test: Option<&TestConfig>, db: Option<&str>) -> V
         sources.push(ConnSource::Command(cmd.clone()));
     }
     sources
+}
+
+/// Resolve the connection for `qf test` ([`test_connection_sources`]); every session it opens
+/// is read-only (`default_transaction_read_only=on`), so even a bug could not write to the
+/// production database it checks.
+pub fn test_connection(
+    test: Option<&TestConfig>,
+    db: Option<&str>,
+) -> Result<ResolvedConn, ConnError> {
+    resolve_connection(&test_connection_sources(test, db)).map(ResolvedConn::read_only)
 }
 
 fn diag(file: &str, code: &str, severity: Severity, message: String) -> ReportedDiagnostic {
@@ -372,6 +383,24 @@ fn usage(message: String) -> ReportedDiagnostic {
     ReportedDiagnostic::project("QF091", message, None)
 }
 
+/// `p` with `.` dropped and `..` applied, without touching the file system.
+fn lexical(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(c);
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// `source` is the project-relative path `rel`, or below it (everything is below `""`).
 fn within(rel: &str, source: &str) -> bool {
     rel.is_empty() || source == rel || source.starts_with(&format!("{rel}/"))
@@ -386,6 +415,7 @@ fn narrow(
     if paths.is_empty() {
         return Ok(queries);
     }
+    let root = lexical(&std::path::absolute(project).unwrap_or_else(|_| project.to_path_buf()));
     let mut scopes = Vec::new();
     for p in paths {
         let abs = if p.is_absolute() {
@@ -393,7 +423,9 @@ fn narrow(
         } else {
             project.join(p)
         };
-        let rel = abs.strip_prefix(project).map_err(|_| {
+        // Lexically: in a deployment the sources the filters name need not exist.
+        let abs = lexical(&abs);
+        let rel = abs.strip_prefix(&root).map_err(|_| {
             usage(format!(
                 "{} is outside the project directory {}",
                 p.display(),
@@ -490,7 +522,7 @@ pub fn test_report(
             r.report.summary.queries = entries.len();
             r
         };
-        let conn = match resolve_connection(&test_connection_sources(cfg.test.as_ref(), db)) {
+        let conn = match test_connection(cfg.test.as_ref(), db) {
             Ok(c) => c,
             Err(e) => return stop(e),
         };

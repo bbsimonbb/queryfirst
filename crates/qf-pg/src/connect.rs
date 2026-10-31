@@ -38,7 +38,7 @@ impl fmt::Debug for ConnSource {
             ConnSource::Explicit(_) => f.write_str("Explicit(<redacted>)"),
             ConnSource::Env(name) => f.debug_tuple("Env").field(name).finish(),
             ConnSource::StandardEnv => f.write_str("StandardEnv"),
-            ConnSource::Command(cmd) => f.debug_tuple("Command").field(cmd).finish(),
+            ConnSource::Command(cmd) => f.debug_tuple("Command").field(&redact(cmd)).finish(),
         }
     }
 }
@@ -146,7 +146,28 @@ impl ResolvedConn {
     pub fn host_port(&self) -> &str {
         &self.host_port
     }
+
+    /// The same connection, with every session opened read-only
+    /// (`-c default_transaction_read_only=on` appended to the startup `options`, after any the
+    /// connection string gave, so it wins). Defence in depth for `qf test` against production:
+    /// describes and catalog reads never write anyway.
+    pub fn read_only(mut self) -> Self {
+        let opts = match self.config.get_options() {
+            Some(o) if !o.trim().is_empty() => format!("{} {READ_ONLY_OPTION}", o.trim()),
+            _ => READ_ONLY_OPTION.to_string(),
+        };
+        self.config.options(&opts);
+        self
+    }
+
+    /// The startup `options` sent to the server (`-c name=value …`), if any.
+    pub fn options(&self) -> Option<&str> {
+        self.config.get_options()
+    }
 }
+
+/// See [`ResolvedConn::read_only`].
+pub const READ_ONLY_OPTION: &str = "-c default_transaction_read_only=on";
 
 impl fmt::Display for ResolvedConn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -205,7 +226,7 @@ pub fn resolve_connection(sources: &[ConnSource]) -> Result<ResolvedConn, ConnEr
             }
             ConnSource::Command(cmd) => {
                 let out = run_helper(cmd)?;
-                return parse_conn(&out, &format!("the output of `{cmd}`"));
+                return parse_conn(&out, &format!("the output of `{}`", redact(cmd)));
             }
         }
     }
@@ -218,16 +239,18 @@ pub fn resolve_connection(sources: &[ConnSource]) -> Result<ResolvedConn, ConnEr
 }
 
 fn run_helper(cmd: &str) -> Result<String, ConnError> {
+    // The command text and its stderr are shown in errors; either may hold a secret.
+    let shown = redact(cmd);
     let mut command = shell(cmd);
     command.stdin(Stdio::null());
     let out = command.output().map_err(|e| {
-        ConnError::config(format!("cannot run connection helper `{cmd}`"))
-            .with_detail(e.to_string())
+        ConnError::config(format!("cannot run connection helper `{shown}`"))
+            .with_detail(redact(&e.to_string()))
     })?;
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stderr = redact(&String::from_utf8_lossy(&out.stderr));
     if !out.status.success() {
         return Err(ConnError::config(format!(
-            "connection helper `{cmd}` failed ({})",
+            "connection helper `{shown}` failed ({})",
             out.status
         ))
         .with_detail(stderr));
@@ -235,11 +258,71 @@ fn run_helper(cmd: &str) -> Result<String, ConnError> {
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if stdout.is_empty() {
         return Err(
-            ConnError::config(format!("connection helper `{cmd}` printed nothing"))
+            ConnError::config(format!("connection helper `{shown}` printed nothing"))
                 .with_detail(stderr),
         );
     }
     Ok(stdout)
+}
+
+/// `text` with anything that looks like a connection secret masked: `postgres://` and
+/// `postgresql://` URLs (any case, up to whitespace or a quote) become `postgres://***`, and the
+/// value of any `password=` (any case, so `PGPASSWORD=` too; spaces around `=` allowed; value
+/// bare or single-quoted) becomes `***`. For text Queryfirst does not control, such as a
+/// helper command and its stderr, before it is shown.
+pub fn redact(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let b = text.as_bytes();
+    let ends_token =
+        |c: u8| c.is_ascii_whitespace() || matches!(c, b'"' | b'\'' | b'`' | b'<' | b'>');
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < b.len() {
+        let rest = &lower[i..];
+        if let Some(scheme) = ["postgresql://", "postgres://"]
+            .into_iter()
+            .find(|s| rest.starts_with(s))
+        {
+            let mut j = i + scheme.len();
+            while j < b.len() && !ends_token(b[j]) {
+                j += 1;
+            }
+            out.push_str("postgres://***");
+            i = j;
+            continue;
+        }
+        if rest.starts_with("password") {
+            let mut j = i + "password".len();
+            while j < b.len() && b[j] == b' ' {
+                j += 1;
+            }
+            if b.get(j) == Some(&b'=') {
+                j += 1;
+                while j < b.len() && b[j] == b' ' {
+                    j += 1;
+                }
+                if b.get(j) == Some(&b'\'') {
+                    j += 1;
+                    while j < b.len() && b[j] != b'\'' {
+                        j += if b[j] == b'\\' { 2 } else { 1 };
+                    }
+                    j = (j + 1).min(b.len());
+                } else {
+                    while j < b.len() && !b[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                }
+                out.push_str(&text[i..i + "password".len()]);
+                out.push_str("=***");
+                i = j;
+                continue;
+            }
+        }
+        let c = text[i..].chars().next().expect("in bounds");
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
 }
 
 #[cfg(windows)]

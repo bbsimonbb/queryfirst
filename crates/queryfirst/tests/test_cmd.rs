@@ -8,7 +8,8 @@ use qf_meta::{
 };
 use qf_pg::{Catalog, ConnSource, Described, DescribedColumn, PgQueryError};
 use queryfirst::cmd::test::{
-    TestEntry, TestOptions, TestReport, test_connection_sources, test_with, utc_timezone,
+    TestEntry, TestOptions, TestReport, test_connection, test_connection_sources, test_with,
+    utc_timezone,
 };
 use queryfirst::config::{TestConfig, TestConnConfig};
 use queryfirst::engine::{Describe, analyze_text};
@@ -648,5 +649,78 @@ fn tree_mode_reads_metas_then_connects() {
     assert!(
         stderr.contains("error[QF091]: no such file or directory"),
         "{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn pick_key_type_change_fails_qf045() {
+    let m = generated(SHAPES[3].0, SHAPES[3].1).await;
+    let target = Target {
+        param: Some(ty("int8")),
+        ..dev()
+    };
+    let r = test(&[entry(m)], &target, "UTC", &opts()).await;
+    let msgs: Vec<String> = codes(&r)
+        .into_iter()
+        .map(|(c, m)| format!("{c} {m}"))
+        .collect();
+    assert_eq!(
+        msgs,
+        [
+            "QF045 ins: parameter :row.name int4 → int8",
+            "QF045 ins: parameter :row.age int4 → int8",
+            "QF045 ins: parameter :rows.name int4 → int8",
+            "QF045 ins: parameter :rows.age int4 → int8",
+        ]
+    );
+    assert_eq!(r.exit_code(), 1);
+}
+
+#[test]
+fn manifest_path_filter_with_relative_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // The fixture's source is app/api/(shared-queries)/address.psql, relative to `deploy`.
+    manifest_with_one(root);
+    let db = "postgres://u@127.0.0.1:1/x";
+    let base = [
+        "--project",
+        "deploy",
+        "test",
+        "--manifest",
+        "deploy/m.json",
+        "--db",
+        db,
+    ];
+    // In scope: the run gets as far as connecting.
+    for filter in ["deploy/app", "deploy/./app/api/../api", "deploy"] {
+        let (code, _, stderr) = output(qf(root).args(base).arg(filter));
+        assert_eq!(code, 2, "{filter}: {stderr}");
+        assert!(stderr.contains("QF090"), "{filter}: {stderr}");
+    }
+    // Nothing there: a usage error, not "outside the project".
+    let (code, _, stderr) = output(qf(root).args(base).arg("deploy/other"));
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("no query in the manifest is in other"),
+        "{stderr}"
+    );
+    let (_, _, stderr) = output(qf(root).args(base).arg("elsewhere"));
+    assert!(
+        stderr.contains("is outside the project directory"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn test_sessions_are_read_only() {
+    let c = test_connection(
+        None,
+        Some("postgres://u@h:5432/db?options=-c%20search_path%3Dapp"),
+    )
+    .unwrap();
+    assert_eq!(
+        c.options(),
+        Some("-c search_path=app -c default_transaction_read_only=on")
     );
 }

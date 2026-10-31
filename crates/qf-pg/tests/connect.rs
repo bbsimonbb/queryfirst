@@ -313,3 +313,86 @@ async fn accept_and_never_answer_times_out_on_connect() {
     assert!(start.elapsed() < Duration::from_secs(3));
     assert_eq!(e.code, "QF090");
 }
+
+#[test]
+fn read_only_appends_to_options() {
+    let plain = resolve_connection(&[ConnSource::Explicit("postgres://u@h:5432/db".into())])
+        .unwrap()
+        .read_only();
+    assert_eq!(plain.options(), Some("-c default_transaction_read_only=on"));
+    let with = resolve_connection(&[ConnSource::Explicit(
+        "postgres://u@h:5432/db?options=-c%20search_path%3Dapp%20-c%20default_transaction_read_only%3Doff".into(),
+    )])
+    .unwrap()
+    .read_only();
+    // Ours comes last, so it wins over a connection string asking for read-write.
+    assert_eq!(
+        with.options(),
+        Some(
+            "-c search_path=app -c default_transaction_read_only=off -c default_transaction_read_only=on"
+        )
+    );
+    let unchanged =
+        resolve_connection(&[ConnSource::Explicit("postgres://u@h:5432/db".into())]).unwrap();
+    assert_eq!(unchanged.options(), None);
+}
+
+#[test]
+fn redact_connection_strings() {
+    use qf_pg::redact;
+    assert_eq!(
+        redact("node x.js postgres://app:pw@db:5432/x?sslmode=require done"),
+        "node x.js postgres://*** done"
+    );
+    assert_eq!(
+        redact("url=\"postgresql://u:p@h/db\""),
+        "url=\"postgres://***\""
+    );
+    assert_eq!(redact("POSTGRES://U:P@H/DB"), "postgres://***");
+    assert_eq!(
+        redact("host=h password=s3cret user=u"),
+        "host=h password=*** user=u"
+    );
+    assert_eq!(
+        redact("password = 'two words\\' here' dbname=x"),
+        "password=*** dbname=x"
+    );
+    assert_eq!(
+        redact("PGPASSWORD=hunter2 node db.js"),
+        "PGPASSWORD=*** node db.js"
+    );
+    assert_eq!(
+        redact("nothing secret: password"),
+        "nothing secret: password"
+    );
+    assert_eq!(redact("é postgres://x é"), "é postgres://*** é");
+}
+
+#[test]
+fn helper_command_and_stderr_are_redacted() {
+    // The command text names a password; the helper prints a URL on stderr and fails.
+    let cmd = if cfg!(windows) {
+        "set PGPASSWORD=cmdsecret& echo bad postgres://u:errsecret@h/db 1>&2 & exit 3"
+    } else {
+        "PGPASSWORD=cmdsecret; echo bad postgres://u:errsecret@h/db 1>&2; exit 3"
+    };
+    let src = ConnSource::Command(cmd.into());
+    let e = resolve_connection(std::slice::from_ref(&src)).unwrap_err();
+    assert_eq!(e.code, "QF091");
+    let all = format!("{e} {e:?} {src:?}");
+    assert!(all.contains("bad postgres://***"), "{all}");
+    assert!(all.contains("PGPASSWORD=***"), "{all}");
+    for secret in ["cmdsecret", "errsecret"] {
+        assert!(!all.contains(secret), "{all}");
+    }
+
+    // A helper whose output does not parse: the origin quotes the (redacted) command.
+    let bad = echo("password=outsecret nonsense");
+    let e =
+        resolve_connection(&[ConnSource::Command(format!("{bad} password=cmdpw"))]).unwrap_err();
+    let all = format!("{e} {e:?}");
+    assert!(
+        !all.contains("cmdpw") && !all.contains("outsecret"),
+        "{all}"
+    );
+}

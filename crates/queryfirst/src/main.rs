@@ -157,7 +157,8 @@ fn main() -> ExitCode {
                 // directory (or --project), if there is one.
                 Some(m) => {
                     let dir = match (&explicit_project, &cwd) {
-                        (Some(p), _) => p.clone(),
+                        // Absolute, so manifest path filters can be made relative to it.
+                        (Some(p), _) => absolute(&cwd, p.clone()),
                         (None, Ok(cwd)) => cwd.clone(),
                         (None, Err(_)) => project.clone(),
                     };

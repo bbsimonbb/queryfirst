@@ -1,6 +1,8 @@
 //! Semantic diff between a committed meta and what a target database reports.
 
-use crate::model::{Column, Param, QueryMeta, Severity, TypeCategory, TypeRef};
+use crate::model::{
+    Column, Param, PickKeyMeta, QueryMeta, Severity, Transform, TypeCategory, TypeRef,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Difference {
@@ -139,6 +141,50 @@ fn enum_diffs(q: &str, what: &str, e: &TypeRef, a: &TypeRef, out: &mut Vec<Diffe
     }
 }
 
+/// The keys of a pick or pick-spread parameter (none for scalars and spreads).
+fn pick_keys(p: &Param) -> &[PickKeyMeta] {
+    match &p.transform {
+        Transform::Pick { keys } | Transform::PickSpread { keys } => keys,
+        Transform::Scalar | Transform::Spread => &[],
+    }
+}
+
+/// Pick keys matched by name: each one's type, then missing keys, then added ones (QF045).
+fn key_diffs(
+    q: &str,
+    param: &str,
+    expected: &[PickKeyMeta],
+    actual: &[PickKeyMeta],
+    out: &mut Vec<Difference>,
+) {
+    let mut removed = Vec::new();
+    for e in expected {
+        let what = format!("parameter :{param}.{}", e.name);
+        match actual.iter().find(|k| k.name == e.name) {
+            Some(a) => type_diffs(q, &what, "QF045", &e.db_type, &a.db_type, out),
+            None => removed.push(diff(
+                "QF045",
+                Severity::Error,
+                format!("{q}: {what} removed"),
+            )),
+        }
+    }
+    out.extend(removed);
+    for a in actual {
+        if !expected.iter().any(|k| k.name == a.name) {
+            out.push(diff(
+                "QF045",
+                Severity::Error,
+                format!(
+                    "{q}: parameter :{param}.{} {} added",
+                    a.name,
+                    fmt_type(&a.db_type)
+                ),
+            ));
+        }
+    }
+}
+
 /// Compare the committed `expected` meta with parameters/columns reported by the target.
 /// Output order: expected items in order, then added ones in actual order.
 pub fn compare(
@@ -157,7 +203,10 @@ pub fn compare(
                 Severity::Error,
                 format!("{q}: {what} removed"),
             )),
-            Some(a) => type_diffs(q, &what, "QF045", &e.db_type, &a.db_type, &mut out),
+            Some(a) => {
+                type_diffs(q, &what, "QF045", &e.db_type, &a.db_type, &mut out);
+                key_diffs(q, &e.name, pick_keys(e), pick_keys(a), &mut out);
+            }
         }
     }
     for a in actual_params {
