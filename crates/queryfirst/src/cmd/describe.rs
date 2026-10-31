@@ -235,8 +235,8 @@ fn describe_input(project: &Path, input: &Input, db: Option<&str>) -> Outcome {
 
 /// Run `qf describe`, print the result and return the exit code.
 ///
-/// The description goes to stdout (text, or with `json` the canonical meta); diagnostics go to
-/// stderr, except that notes and warnings join the text description on stdout.
+/// stdout carries only the description (text, or with `json` the canonical meta); every
+/// diagnostic, note and warning goes to stderr.
 pub fn run(
     project: &Path,
     file: Option<&Path>,
@@ -259,6 +259,14 @@ pub fn run(
             return report.exit_code();
         }
     };
+    let (stdout, stderr, code) = render_outcome(&a, json);
+    print!("{stdout}");
+    eprint!("{stderr}");
+    code
+}
+
+/// What to print for a described query: `(stdout, stderr, exit code)`.
+pub fn render_outcome(a: &Analyzed, json: bool) -> (String, String, u8) {
     let mut report = Report::new("describe");
     report.summary.queries = 1;
     let file = posix(&a.source);
@@ -267,13 +275,19 @@ pub fn run(
     }
     report.finish();
     let broken = a.diagnostics.iter().any(|d| d.severity == Severity::Error);
-    if json {
-        println!("{}", to_canonical_json(&a.meta));
-        eprint!("{}", render_diagnostics(&report));
-    } else if broken {
-        eprint!("{}", render_human(&report));
+    let (stdout, stderr) = if broken && !json {
+        (String::new(), render_human(&report))
+    } else if json {
+        (
+            format!(
+                "{}
+",
+                to_canonical_json(&a.meta)
+            ),
+            render_diagnostics(&report),
+        )
     } else {
-        print!("{}{}", render_text(&a.meta), render_diagnostics(&report));
-    }
-    report.exit_code()
+        (render_text(&a.meta), render_diagnostics(&report))
+    };
+    (stdout, stderr, report.exit_code())
 }

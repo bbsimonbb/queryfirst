@@ -7,7 +7,7 @@ use qf_meta::{
     Transform, TypeCategory, TypeRef, from_json,
 };
 use qf_pg::{Catalog, Described, DescribedColumn, PgQueryError};
-use queryfirst::cmd::describe::{Input, choose_input, describe_with, render_text};
+use queryfirst::cmd::describe::{Input, choose_input, describe_with, render_outcome, render_text};
 use queryfirst::engine::Describe;
 
 fn ty(name: &str, modifier: Option<&str>, array: bool) -> TypeRef {
@@ -248,4 +248,28 @@ fn no_input_usage_error() {
 fn meta_json_roundtrips() {
     let json = qf_meta::to_canonical_json(&meta());
     assert_eq!(from_json(&json).unwrap(), meta());
+}
+
+#[test]
+fn notes_go_to_stderr_not_stdout() {
+    let mut a = describe_sql("SELECT id FROM t");
+    a.diagnostics.push(qf_sqlfile::Diagnostic {
+        code: "QF020",
+        severity: qf_sqlfile::Severity::Note,
+        message: "could not prove column x non-null; typed as nullable".into(),
+        hint: None,
+        line: 1,
+        col: 1,
+    });
+    for json in [false, true] {
+        let (out, err, code) = render_outcome(&a, json);
+        assert_eq!(code, 0);
+        assert!(!out.contains("QF020"), "{out}");
+        assert!(err.contains("note[QF020]"), "{err}");
+    }
+    let (out, _, _) = render_outcome(&a, false);
+    assert!(out.starts_with(
+        "adhoc
+"
+    ));
 }
