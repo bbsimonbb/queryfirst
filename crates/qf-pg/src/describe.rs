@@ -25,9 +25,19 @@ pub struct DescribedColumn {
 
 /// Prepare `db_statement` on a pooled connection and describe it. The statement is never
 /// executed: tokio-postgres sends Parse/Describe/Sync, then Close when the statement drops.
+/// Taking longer than [`Pool::query_timeout`] is a [`PgQueryError::Connection`] error.
 pub async fn describe(pool: &Pool, db_statement: &str) -> Result<Described, PgQueryError> {
     let client = pool.get().await;
-    let stmt = client.prepare(db_statement).await?;
+    let timeout = pool.query_timeout();
+    let stmt = tokio::time::timeout(timeout, client.prepare(db_statement))
+        .await
+        .map_err(|_| {
+            PgQueryError::Connection(format!(
+                "no answer from {} within {}s",
+                pool.target(),
+                timeout.as_secs_f32()
+            ))
+        })??;
     let params = stmt.params().iter().map(|t| type_ref(t, -1)).collect();
     let columns = stmt
         .columns()

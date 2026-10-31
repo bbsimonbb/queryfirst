@@ -257,27 +257,119 @@ fn shell(cmd: &str) -> Command {
     c
 }
 
-/// Pull `sslmode=<v>` out of a URL or `key=value` string: tokio-postgres only knows
-/// disable/prefer/require, so verify modes are passed on as `require` and handled here.
-fn take_sslmode(s: &str) -> Result<(String, Option<SslMode>), ConnError> {
-    let Some(at) = s.find("sslmode=") else {
-        return Ok((s.to_string(), None));
-    };
-    let start = at + "sslmode=".len();
-    let end = s[start..]
-        .find(|c: char| c == '&' || c.is_whitespace())
-        .map_or(s.len(), |i| start + i);
-    let value = &s[start..end];
-    let mode = SslMode::parse(value).ok_or_else(|| {
+fn parse_sslmode(value: &str) -> Result<SslMode, ConnError> {
+    SslMode::parse(value).ok_or_else(|| {
         ConnError::config(format!("invalid sslmode `{value}`"))
             .with_detail("expected disable, allow, prefer, require, verify-ca or verify-full")
-    })?;
-    let passed = match mode {
-        SslMode::Disable => "disable",
-        SslMode::Prefer => "prefer",
-        _ => "require",
+    })
+}
+
+/// Take `sslmode` out of a URL or `key=value` connection string, returning the string without
+/// it (tokio-postgres only knows disable/prefer/require; the mode is applied after parsing).
+/// Only a real `sslmode` option counts: never text inside a password or another value.
+fn take_sslmode(s: &str) -> Result<(String, Option<SslMode>), ConnError> {
+    if s.starts_with("postgres://") || s.starts_with("postgresql://") {
+        take_sslmode_url(s)
+    } else {
+        take_sslmode_kv(s)
+    }
+}
+
+fn take_sslmode_url(s: &str) -> Result<(String, Option<SslMode>), ConnError> {
+    // The query starts at the first `?` after the userinfo (which ends at the last `@`).
+    let after_userinfo = s.rfind('@').map_or(0, |i| i + 1);
+    let Some(q) = s[after_userinfo..].find('?').map(|i| after_userinfo + i) else {
+        return Ok((s.to_string(), None));
     };
-    Ok((format!("{}{passed}{}", &s[..start], &s[end..]), Some(mode)))
+    let mut mode = None;
+    let mut kept = Vec::new();
+    for pair in s[q + 1..].split('&') {
+        match pair.split_once('=') {
+            Some(("sslmode", v)) => mode = Some(parse_sslmode(v)?),
+            _ => kept.push(pair),
+        }
+    }
+    let base = &s[..q];
+    let rebuilt = if kept.iter().all(|p| p.is_empty()) {
+        base.to_string()
+    } else {
+        format!("{base}?{}", kept.join("&"))
+    };
+    Ok((rebuilt, mode))
+}
+
+/// libpq `key=value` form: whitespace-separated, spaces allowed around `=`, values optionally
+/// single-quoted, backslash escapes in both.
+fn take_sslmode_kv(s: &str) -> Result<(String, Option<SslMode>), ConnError> {
+    let b: Vec<(usize, char)> = s.char_indices().collect();
+    let at = |i: usize| b.get(i).map(|&(_, c)| c);
+    let byte = |i: usize| b.get(i).map_or(s.len(), |&(o, _)| o);
+    let skip_ws = |mut i: usize| {
+        while at(i).is_some_and(char::is_whitespace) {
+            i += 1;
+        }
+        i
+    };
+    let mut mode = None;
+    let mut out = String::new();
+    let mut i = 0;
+    loop {
+        let token_start = skip_ws(i);
+        if token_start >= b.len() {
+            out.push_str(&s[byte(i)..]);
+            break;
+        }
+        let mut j = token_start;
+        while at(j).is_some_and(|c| c != '=' && !c.is_whitespace()) {
+            j += 1;
+        }
+        let key = &s[byte(token_start)..byte(j)];
+        j = skip_ws(j);
+        if at(j) != Some('=') {
+            // Malformed; leave the rest for tokio-postgres to reject.
+            out.push_str(&s[byte(i)..]);
+            break;
+        }
+        j = skip_ws(j + 1);
+        let mut value = String::new();
+        if at(j) == Some('\'') {
+            j += 1;
+            loop {
+                match at(j) {
+                    None => break,
+                    Some('\'') => {
+                        j += 1;
+                        break;
+                    }
+                    Some('\\') if let Some(next) = at(j + 1) => {
+                        value.push(next);
+                        j += 2;
+                    }
+                    Some(c) => {
+                        value.push(c);
+                        j += 1;
+                    }
+                }
+            }
+        } else {
+            while let Some(c) = at(j).filter(|c| !c.is_whitespace()) {
+                if let Some(next) = at(j + 1).filter(|_| c == '\\') {
+                    value.push(next);
+                    j += 2;
+                } else {
+                    value.push(c);
+                    j += 1;
+                }
+            }
+        }
+        if key == "sslmode" {
+            mode = Some(parse_sslmode(&value)?);
+        } else {
+            out.push_str(&s[byte(i)..byte(j)]);
+        }
+        i = j;
+    }
+    Ok((out.trim().to_string(), mode))
 }
 
 fn parse_conn(s: &str, origin: &str) -> Result<ResolvedConn, ConnError> {
@@ -435,7 +527,16 @@ struct PoolInner {
 pub struct Pool {
     inner: Arc<PoolInner>,
     permits: Arc<Semaphore>,
+    query_timeout: Duration,
 }
+
+/// How long one describe or catalog query may take before the connection is considered gone.
+/// A tunnel that goes silent (no RST) would otherwise hang until TCP gives up, which can take
+/// hours. Override with [`Pool::with_query_timeout`].
+pub const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Idle time before TCP keepalive probes start, so dead peers are noticed on idle connections.
+pub const KEEPALIVES_IDLE: Duration = Duration::from_secs(30);
 
 impl fmt::Debug for Pool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -498,6 +599,16 @@ impl Pool {
     pub fn target(&self) -> &str {
         &self.inner.target
     }
+
+    /// Set the per-query timeout (default [`DEFAULT_QUERY_TIMEOUT`]).
+    pub fn with_query_timeout(mut self, timeout: Duration) -> Self {
+        self.query_timeout = timeout;
+        self
+    }
+
+    pub fn query_timeout(&self) -> Duration {
+        self.query_timeout
+    }
 }
 
 /// Open `size` (at least 1) connections concurrently. Any failure, or not finishing within
@@ -511,6 +622,8 @@ pub async fn connect_pool(
     let tls = tls_connector(c.ssl)?;
     let mut config = c.config.clone();
     config.connect_timeout(timeout);
+    config.keepalives(true);
+    config.keepalives_idle(KEEPALIVES_IDLE);
     let target = c.host_port.clone();
 
     let mut tasks = tokio::task::JoinSet::new();
@@ -548,6 +661,7 @@ pub async fn connect_pool(
             target,
         }),
         permits: Arc::new(Semaphore::new(size)),
+        query_timeout: DEFAULT_QUERY_TIMEOUT,
     })
 }
 

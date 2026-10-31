@@ -125,10 +125,19 @@ async fn describes_params_and_columns() {
             [
                 ("pg_catalog", "int4", false),
                 ("pg_catalog", "numeric", false),
-                ("pg_catalog", "varchar", false)
+                // There is no varchar = varchar operator: Postgres compares as text.
+                ("pg_catalog", "text", false)
             ]
         );
         assert!(d.params.iter().all(|t| t.modifier.is_none()));
+
+        // An assignment target types the parameter as the column's type.
+        let upd = lex("UPDATE customers SET email = :email WHERE id = :id");
+        let u = describe(&db.pool, &upd.db_statement)
+            .await
+            .expect("describe update");
+        let p: Vec<&str> = u.params.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(p, ["varchar", "int4"]);
 
         let names: Vec<&str> = d.columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(

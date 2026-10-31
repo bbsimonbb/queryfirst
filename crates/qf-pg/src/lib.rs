@@ -10,8 +10,8 @@ mod errors;
 
 pub use catalog::{Catalog, CatalogColumn, CatalogTable};
 pub use connect::{
-    ConnError, ConnSource, Pool, PooledClient, ResolvedConn, SslMode, connect_pool,
-    resolve_connection,
+    ConnError, ConnSource, DEFAULT_QUERY_TIMEOUT, KEEPALIVES_IDLE, Pool, PooledClient,
+    ResolvedConn, SslMode, connect_pool, resolve_connection,
 };
 pub use describe::{Described, DescribedColumn, describe};
 pub use errors::{PgQueryError, is_connection_error, to_diagnostic};

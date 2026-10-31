@@ -77,6 +77,27 @@ ORDER BY c.oid, a.attnum";
 
 const SETTINGS_SQL: &str = "SELECT current_setting('TimeZone'), current_schemas(false)::text[]";
 
+/// Run one catalog query under the pool's query timeout; a timeout or a lost connection is
+/// QF090 "cannot reach database".
+async fn timed<T>(
+    pool: &Pool,
+    query: impl Future<Output = Result<T, tokio_postgres::Error>>,
+) -> Result<T, ConnError> {
+    match tokio::time::timeout(pool.query_timeout(), query).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) if e.as_db_error().is_some() => Err(ConnError::new(
+            "QF090",
+            format!("cannot read the catalog at {}", pool.target()),
+        )
+        .with_detail(describe_pg_error(&e))),
+        Ok(Err(e)) => Err(ConnError::unreachable(pool.target(), describe_pg_error(&e))),
+        Err(_) => Err(ConnError::unreachable(
+            pool.target(),
+            format!("no answer within {}s", pool.query_timeout().as_secs_f32()),
+        )),
+    }
+}
+
 fn first_char(s: &str) -> char {
     s.chars().next().unwrap_or(' ')
 }
@@ -85,20 +106,8 @@ impl Catalog {
     /// Load types, enums, columns, the search path and the session time zone.
     pub async fn load(pool: &Pool) -> Result<Catalog, ConnError> {
         let client = pool.get().await;
-        let fail = |e: tokio_postgres::Error| {
-            if e.as_db_error().is_some() {
-                ConnError::new(
-                    "QF090",
-                    format!("cannot read the catalog at {}", pool.target()),
-                )
-                .with_detail(describe_pg_error(&e))
-            } else {
-                ConnError::unreachable(pool.target(), describe_pg_error(&e))
-            }
-        };
-
         let mut cat = Catalog::default();
-        for row in client.query(TYPES_SQL, &[]).await.map_err(fail)? {
+        for row in timed(pool, client.query(TYPES_SQL, &[])).await? {
             cat.types.insert(
                 row.get(0),
                 TypeInfo {
@@ -110,18 +119,18 @@ impl Catalog {
                 },
             );
         }
-        for row in client.query(ENUMS_SQL, &[]).await.map_err(fail)? {
+        for row in timed(pool, client.query(ENUMS_SQL, &[])).await? {
             cat.enums.entry(row.get(0)).or_default().push(row.get(1));
         }
         for labels in cat.enums.values_mut() {
             labels.sort();
         }
 
-        let settings = client.query_one(SETTINGS_SQL, &[]).await.map_err(fail)?;
+        let settings = timed(pool, client.query_one(SETTINGS_SQL, &[])).await?;
         cat.timezone = settings.get(0);
         cat.search_path = settings.get(1);
 
-        for row in client.query(COLUMNS_SQL, &[]).await.map_err(fail)? {
+        for row in timed(pool, client.query(COLUMNS_SQL, &[])).await? {
             let oid: u32 = row.get(0);
             let schema: String = row.get(1);
             let table: String = row.get(2);

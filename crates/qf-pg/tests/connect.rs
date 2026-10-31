@@ -189,3 +189,127 @@ async fn unreachable_fast_fail() {
         e.message
     );
 }
+
+#[test]
+fn sslmode_inside_password_or_value_is_not_sslmode() {
+    let c = resolve_connection(&[ConnSource::Explicit(
+        "postgres://u:xsslmode=require@h:5432/db?sslmode=disable".into(),
+    )])
+    .unwrap();
+    assert_eq!(c.ssl_mode().as_str(), "disable");
+    assert_eq!(c.display_target, "h:5432/db");
+
+    let c = resolve_connection(&[ConnSource::Explicit(
+        "host=h port=5432 dbname=db user=u password='a sslmode=require' sslmode=disable".into(),
+    )])
+    .unwrap();
+    assert_eq!(c.ssl_mode().as_str(), "disable");
+    assert_eq!(c.display_target, "h:5432/db");
+
+    let c = resolve_connection(&[ConnSource::Explicit(
+        "host=h dbname=db user=u password=sslmode=require sslmode=verify-full".into(),
+    )])
+    .unwrap();
+    assert_eq!(c.ssl_mode().as_str(), "verify-full");
+}
+
+#[test]
+fn quoted_kv_sslmode() {
+    let c = resolve_connection(&[ConnSource::Explicit(
+        "host=h dbname=db user=u sslmode='require'".into(),
+    )])
+    .unwrap();
+    assert_eq!(c.ssl_mode().as_str(), "require");
+    let c = resolve_connection(&[ConnSource::Explicit(
+        "host=h dbname=db user=u sslmode = 'verify-ca' port=5441".into(),
+    )])
+    .unwrap();
+    assert_eq!(c.ssl_mode().as_str(), "verify-ca");
+    assert_eq!(c.display_target, "h:5441/db");
+}
+
+/// A server that completes the startup handshake (trust auth) and then never answers again,
+/// like a tunnel that went silent without resetting the connection.
+async fn silent_server() -> std::net::SocketAddr {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut len = [0u8; 4];
+                sock.read_exact(&mut len).await.unwrap();
+                let mut rest = vec![0u8; u32::from_be_bytes(len) as usize - 4];
+                sock.read_exact(&mut rest).await.unwrap();
+                // AuthenticationOk, ReadyForQuery(idle).
+                sock.write_all(&[b'R', 0, 0, 0, 8, 0, 0, 0, 0, b'Z', 0, 0, 0, 5, b'I'])
+                    .await
+                    .unwrap();
+                let mut sink = [0u8; 1024];
+                while let Ok(n) = sock.read(&mut sink).await {
+                    if n == 0 {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn silent_connection_times_out_as_connection_error() {
+    let addr = silent_server().await;
+    let c = resolve_connection(&[ConnSource::Explicit(format!(
+        "postgres://u@{addr}/db?sslmode=disable"
+    ))])
+    .unwrap();
+    let pool = connect_pool(&c, 1, Duration::from_secs(5))
+        .await
+        .expect("handshake succeeds")
+        .with_query_timeout(Duration::from_millis(300));
+
+    let start = Instant::now();
+    let err = qf_pg::describe(&pool, "SELECT 1")
+        .await
+        .expect_err("must time out");
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert!(qf_pg::is_connection_error(&err), "{err:?}");
+
+    let start = Instant::now();
+    let err = qf_pg::Catalog::load(&pool)
+        .await
+        .expect_err("must time out");
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert_eq!(err.code, "QF090");
+    assert!(
+        err.message
+            .contains(&format!("cannot reach database at {addr}")),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn accept_and_never_answer_times_out_on_connect() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = listener.accept().await {
+            held.push(sock);
+        }
+    });
+    let c = resolve_connection(&[ConnSource::Explicit(format!(
+        "postgres://u@{addr}/db?sslmode=disable"
+    ))])
+    .unwrap();
+    let start = Instant::now();
+    let e = connect_pool(&c, 1, Duration::from_millis(500))
+        .await
+        .expect_err("must time out");
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert_eq!(e.code, "QF090");
+}
