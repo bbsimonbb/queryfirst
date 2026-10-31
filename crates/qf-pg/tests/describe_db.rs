@@ -263,14 +263,20 @@ async fn undetermined_param_type_is_qf011_with_cast_hint() {
         // Never typed at all: 42P18, without a position. Typed by one use but not by another:
         // 42P08, positioned at the untyped use.
         let cases = [
-            ("SELECT 1 WHERE :p IS NULL", "42P18", 16),
+            (
+                "SELECT 1 WHERE :p IS NULL",
+                "42P18",
+                "could not determine the type of parameter :p",
+                16,
+            ),
             (
                 "SELECT id FROM customers WHERE :p IS NULL OR email = :p",
                 "42P08",
+                "could not infer a single type for parameter :p",
                 32,
             ),
         ];
-        for (sql, sqlstate, col) in cases {
+        for (sql, sqlstate, message, col) in cases {
             let lexed = lex(sql);
             let err = describe(&db.pool, &lexed.db_statement)
                 .await
@@ -283,11 +289,42 @@ async fn undetermined_param_type_is_qf011_with_cast_hint() {
             let diag = to_diagnostic(&err, &lexed, &db.catalog);
             assert_eq!(diag.code, "QF011", "{sql}");
             assert_eq!(diag.severity, Severity::Error);
-            assert_eq!(diag.message, "could not determine the type of parameter :p");
+            assert_eq!(diag.message, message, "{sql}");
             let hint = diag.hint.expect("hint");
             assert!(hint.contains(":p::"), "{hint}");
             assert_eq!((diag.line, diag.col), (1, col), "{sql}");
         }
+    })
+    .await;
+}
+
+/// 42P18 is not always about a parameter: `ARRAY[]` keeps the server's message and hint (the
+/// `ARRAY[]::integer[]` cast), as QF010 at `ARRAY`.
+#[tokio::test]
+async fn empty_array_is_qf010_with_the_server_hint() {
+    with_db(|db| async move {
+        let lexed = lex("SELECT ARRAY[] AS a, :p::int AS p");
+        let err = describe(&db.pool, &lexed.db_statement).await.unwrap_err();
+        let qf_pg::PgQueryError::Db {
+            code,
+            message,
+            hint,
+            position,
+            ..
+        } = &err
+        else {
+            panic!("{err:?}");
+        };
+        assert_eq!((code.as_str(), *position), ("42P18", Some(8)));
+        let diag = to_diagnostic(&err, &lexed, &db.catalog);
+        assert_eq!(diag.code, "QF010");
+        assert_eq!(&diag.message, message);
+        assert_eq!(&diag.hint, hint);
+        assert!(
+            diag.hint.as_deref().unwrap_or("").contains("ARRAY[]::"),
+            "{hint:?}"
+        );
+        assert_eq!((diag.line, diag.col), (1, 8));
     })
     .await;
 }

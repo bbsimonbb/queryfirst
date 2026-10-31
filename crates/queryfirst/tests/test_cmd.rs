@@ -370,10 +370,10 @@ async fn prepare_failure_qf046() {
     let target = Target {
         fail: Some(PgQueryError::Db {
             code: "42P01".into(),
-            message: "relation \"orders\" does not exist".into(),
+            message: "la relation « orders » n'existe pas".into(),
             detail: None,
             hint: None,
-            position: Some(32),
+            position: Some(29),
         }),
         ..dev()
     };
@@ -384,7 +384,7 @@ async fn prepare_failure_qf046() {
     assert!(
         d.message
             .starts_with("getOrder: does not prepare on the target database: ")
-            && d.message.contains("relation \"orders\" does not exist"),
+            && d.message.ends_with(r#"relation "orders" does not exist"#),
         "{}",
         d.message
     );

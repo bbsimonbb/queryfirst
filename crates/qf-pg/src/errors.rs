@@ -93,13 +93,19 @@ pub fn to_diagnostic(err: &PgQueryError, lexed: &LexedQuery, catalog: &Catalog) 
     };
     let statement = lexed.db_statement.as_str();
 
-    // 42P18 indeterminate_datatype (no position); 42P08 ambiguous_parameter, which Postgres also
-    // raises, positioned, for a use of a parameter it could not type.
+    // 42P18 indeterminate_datatype: a parameter never typed (no position), but also other
+    // values, e.g. `ARRAY[]` (positioned there). 42P08 ambiguous_parameter: a parameter whose
+    // uses gave conflicting types, or one use none (positioned at that use). Only an error about
+    // a parameter becomes QF011: a `$n` at the position or, without a position, in the message.
     if code == "42P18" || code == "42P08" {
-        let n = position
-            .and_then(|p| param_at(statement, p))
-            .or_else(|| param_in_message(message));
-        return undetermined_param(n, lexed, position);
+        let n = match position {
+            Some(p) => param_at(statement, p),
+            None => param_in_message(message),
+        };
+        if let Some(n) = n {
+            let server_hint = join_hint(detail.as_deref(), hint.as_deref());
+            return param_type_error(n, code == "42P08", server_hint, lexed, position);
+        }
     }
 
     let mut hint = join_hint(detail.as_deref(), hint.as_deref());
@@ -160,33 +166,47 @@ fn param_in_message(message: &str) -> Option<usize> {
     leading_number(message.split_once('$')?.1)
 }
 
-fn undetermined_param(n: Option<usize>, lexed: &LexedQuery, position: Option<u32>) -> Diagnostic {
-    let bound = n.and_then(|n| lexed.param_order.get(n.wrapping_sub(1)));
-    let pos = position.or_else(|| n.and_then(|n| placeholder_char_pos(&lexed.db_statement, n)));
+/// QF011 for parameter `$n`. `conflicting` (42P08): its uses gave no single type, and the
+/// server's detail (e.g. `text versus integer`) and hint come first in our hint.
+fn param_type_error(
+    n: usize,
+    conflicting: bool,
+    server_hint: Option<String>,
+    lexed: &LexedQuery,
+    position: Option<u32>,
+) -> Diagnostic {
+    let bound = lexed.param_order.get(n.wrapping_sub(1));
+    let pos = position.or_else(|| placeholder_char_pos(&lexed.db_statement, n));
     let (line, col) = lexed.map.db_char_pos_to_source(pos.unwrap_or(1));
-    let generic_hint = || "add a cast to the parameter, e.g. :p::text".to_string();
-    let (message, hint) = match (bound, n) {
-        (Some(name), _) => match name.split_once('.') {
+    let what = if conflicting {
+        "could not infer a single type for"
+    } else {
+        "could not determine the type of"
+    };
+    let (message, hint) = match bound {
+        Some(name) => match name.split_once('.') {
             None => (
-                format!("could not determine the type of parameter :{name}"),
+                format!("{what} parameter :{name}"),
                 format!("add a cast, e.g. :{name}::text"),
             ),
             Some((param, key)) => (
-                format!("could not determine the type of key `{key}` of parameter :{param}"),
+                format!("{what} key `{key}` of parameter :{param}"),
                 format!(
-                    "use :{param} where the type of `{key}` can be inferred, \
-                     or cast it in the query, e.g. :{param}::text"
+                    "use :{param} where the type of `{key}` can be inferred,                      or cast it in the query, e.g. :{param}::text"
                 ),
             ),
         },
-        (None, Some(n)) => (
-            format!("could not determine the type of parameter ${n}"),
-            generic_hint(),
+        None => (
+            format!("{what} parameter ${n}"),
+            "add a cast to the parameter, e.g. :p::text".to_string(),
         ),
-        (None, None) => (
-            "could not determine the type of a parameter".to_string(),
-            generic_hint(),
+    };
+    let hint = match server_hint {
+        Some(h) => format!(
+            "{h}
+{hint}"
         ),
+        None => hint,
     };
     Diagnostic {
         code: "QF011",
@@ -248,8 +268,8 @@ fn identifier(s: &str) -> Option<(String, &str)> {
         return None;
     }
     let end = s.find(|c: char| !ident_char(c)).unwrap_or(s.len());
-    // `U&"…"` is a Unicode-escaped identifier, not `u`.
-    if s[end..].starts_with('&') {
+    // `U&"…"` is a Unicode-escaped identifier, not `u` (but `emial&1` is `emial`).
+    if s[..end].eq_ignore_ascii_case("u") && s[end..].starts_with("&\"") {
         return None;
     }
     Some((s[..end].to_ascii_lowercase(), &s[end..]))
@@ -518,7 +538,7 @@ mod tests {
         // 42P08, positioned at the use Postgres could not type.
         let d = to_diagnostic(&db("42P08", msg, None, Some(32)), &l, &cat);
         assert_eq!(d.code, "QF011");
-        assert_eq!(d.message, "could not determine the type of parameter :p");
+        assert_eq!(d.message, "could not infer a single type for parameter :p");
         assert_eq!(d.hint.as_deref(), Some("add a cast, e.g. :p::text"));
         assert_eq!((d.line, d.col), (1, 32));
 
@@ -529,10 +549,49 @@ mod tests {
         assert_eq!(d.message, "could not determine the type of parameter :b");
         assert_eq!((d.line, d.col), (1, 32));
 
-        // Nothing to go on: still QF011 with the cast hint.
-        let d = to_diagnostic(&db("42P18", "???", None, None), &l, &cat);
+        // No parameter named anywhere: not QF011; the server's message and hint stay.
+        let d = to_diagnostic(&db("42P18", "???", Some("astuce"), None), &l, &cat);
+        assert_eq!(
+            (d.code, d.message.as_str(), d.hint.as_deref()),
+            ("QF010", "???", Some("astuce"))
+        );
+    }
+
+    #[test]
+    fn empty_array_is_not_a_parameter_error() {
+        let l = lex("SELECT ARRAY[] AS a WHERE :p::int = 1");
+        let msg = "ne peut pas déterminer le type d'un tableau vide";
+        let hint = "Convertit explicitement vers le type désiré. Par exemple ARRAY[]::integer[].";
+        // Positioned at `ARRAY`, and the message's `$`-free text names no parameter either way.
+        let d = to_diagnostic(&db("42P18", msg, Some(hint), Some(8)), &l, &catalog());
+        assert_eq!(
+            (d.code, d.message.as_str(), d.hint.as_deref()),
+            ("QF010", msg, Some(hint))
+        );
+        assert_eq!((d.line, d.col), (1, 8));
+    }
+
+    #[test]
+    fn conflicting_param_types_keep_the_server_detail() {
+        let l = lex("SELECT 1 WHERE :p = 'a' AND :p = 1");
+        let e = PgQueryError::Db {
+            code: "42P08".into(),
+            message: "types incohérents déduits pour le paramètre $1".into(),
+            detail: Some("text versus integer".into()),
+            hint: None,
+            position: Some(pos(&l.db_statement, "$1 = 1")),
+        };
+        let d = to_diagnostic(&e, &l, &catalog());
         assert_eq!(d.code, "QF011");
-        assert!(d.hint.unwrap().contains(":p::"));
+        assert_eq!(d.message, "could not infer a single type for parameter :p");
+        assert_eq!(
+            d.hint.as_deref(),
+            Some(
+                "text versus integer
+add a cast, e.g. :p::text"
+            )
+        );
+        assert_eq!((d.line, d.col), (1, 29));
     }
 
     #[test]
@@ -544,6 +603,9 @@ mod tests {
         assert_eq!(name_at("SELECT 'é', données FROM t", 13), v(&["données"]));
         assert_eq!(name_at("SELECT (c).x", 8), None);
         assert_eq!(name_at(r#"SELECT U&"x""#, 8), None);
+        assert_eq!(name_at(r#"SELECT u&"x""#, 8), None);
+        assert_eq!(name_at("SELECT emial&1 FROM t", 8), v(&["emial"]));
+        assert_eq!(name_at("SELECT u&1 FROM t", 8), v(&["u"]));
         assert_eq!(name_at("SELECT x", 99), None);
         assert_eq!(name_at("SELECT x", 0), None);
     }
