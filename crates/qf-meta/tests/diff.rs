@@ -213,3 +213,51 @@ fn matched_by_name() {
     let c = vec![col("y", ty("text"), true), col("x", ty("int4"), false)];
     assert!(compare(&m, &p, &c).is_empty());
 }
+
+#[test]
+fn category_change_error() {
+    let mut e = enum_ty(&["a"]);
+    e.name = "status".into();
+    let mut a = e.clone();
+    a.category = TypeCategory::Domain;
+    a.enum_values = None;
+    let m = meta(vec![], vec![col("x", e, false)]);
+    one(
+        compare(&m, &[], &[col("x", a, false)]),
+        "QF041",
+        Severity::Error,
+        "getInvoice: column \"x\" public.status (enum) → public.status (domain)",
+    );
+}
+
+#[test]
+fn enum_values_some_to_none_error() {
+    let e = enum_ty(&["a", "b"]);
+    let mut a = e.clone();
+    a.enum_values = None;
+    let m = meta(vec![], vec![col("x", e, false)]);
+    one(
+        compare(&m, &[], &[col("x", a, false)]),
+        "QF041",
+        Severity::Error,
+        "getInvoice: column \"x\" public.accessLevel enum values [a, b] → none",
+    );
+}
+
+#[test]
+fn type_and_nullability_change_two_differences() {
+    let m = meta(vec![], vec![col("x", ty("int4"), false)]);
+    let d = compare(&m, &[], &[col("x", ty("int8"), true)]);
+    assert_eq!(d.len(), 2, "{d:?}");
+    assert_eq!(d[0].code, "QF041");
+    assert_eq!(d[1].code, "QF042");
+}
+
+#[test]
+fn enum_lost_and_gained_two_differences() {
+    let m = meta(vec![], vec![col("x", enum_ty(&["a", "b"]), false)]);
+    let d = compare(&m, &[], &[col("x", enum_ty(&["b", "c"]), false)]);
+    assert_eq!(d.len(), 2, "{d:?}");
+    assert_eq!((d[0].code, d[0].severity), ("QF047", Severity::Error));
+    assert_eq!((d[1].code, d[1].severity), ("QF047", Severity::Warning));
+}

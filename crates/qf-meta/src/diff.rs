@@ -1,6 +1,6 @@
 //! Semantic diff between a committed meta and what a target database reports.
 
-use crate::model::{Column, Param, QueryMeta, Severity, TypeRef};
+use crate::model::{Column, Param, QueryMeta, Severity, TypeCategory, TypeRef};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Difference {
@@ -27,7 +27,69 @@ fn fmt_type(t: &TypeRef) -> String {
 }
 
 fn same_type(a: &TypeRef, b: &TypeRef) -> bool {
-    a.schema == b.schema && a.name == b.name && a.modifier == b.modifier && a.array == b.array
+    a.schema == b.schema
+        && a.name == b.name
+        && a.modifier == b.modifier
+        && a.array == b.array
+        && a.category == b.category
+}
+
+fn category_name(c: TypeCategory) -> &'static str {
+    match c {
+        TypeCategory::Base => "base",
+        TypeCategory::Enum => "enum",
+        TypeCategory::Domain => "domain",
+        TypeCategory::Composite => "composite",
+        TypeCategory::Other => "other",
+    }
+}
+
+/// Like `fmt_type`, with the category appended when the two sides differ in it.
+fn fmt_pair(e: &TypeRef, a: &TypeRef) -> (String, String) {
+    if e.category == a.category {
+        (fmt_type(e), fmt_type(a))
+    } else {
+        (
+            format!("{} ({})", fmt_type(e), category_name(e.category)),
+            format!("{} ({})", fmt_type(a), category_name(a.category)),
+        )
+    }
+}
+
+/// Type and enum-value differences between two sides, reported under `code`.
+fn type_diffs(
+    q: &str,
+    what: &str,
+    code: &'static str,
+    e: &TypeRef,
+    a: &TypeRef,
+    out: &mut Vec<Difference>,
+) {
+    if !same_type(e, a) {
+        let (l, r) = fmt_pair(e, a);
+        out.push(diff(
+            code,
+            Severity::Error,
+            format!("{q}: {what} {l} → {r}"),
+        ));
+    } else if e.enum_values.is_some() != a.enum_values.is_some() {
+        let show = |t: &TypeRef| match &t.enum_values {
+            Some(v) => format!("[{}]", v.join(", ")),
+            None => "none".to_string(),
+        };
+        out.push(diff(
+            code,
+            Severity::Error,
+            format!(
+                "{q}: {what} {} enum values {} → {}",
+                fmt_type(a),
+                show(e),
+                show(a)
+            ),
+        ));
+    } else {
+        enum_diffs(q, what, e, a, out);
+    }
 }
 
 fn diff(code: &'static str, severity: Severity, message: String) -> Difference {
@@ -95,16 +157,7 @@ pub fn compare(
                 Severity::Error,
                 format!("{q}: {what} removed"),
             )),
-            Some(a) if !same_type(&e.db_type, &a.db_type) => out.push(diff(
-                "QF045",
-                Severity::Error,
-                format!(
-                    "{q}: {what} {} → {}",
-                    fmt_type(&e.db_type),
-                    fmt_type(&a.db_type)
-                ),
-            )),
-            Some(a) => enum_diffs(q, &what, &e.db_type, &a.db_type, &mut out),
+            Some(a) => type_diffs(q, &what, "QF045", &e.db_type, &a.db_type, &mut out),
         }
     }
     for a in actual_params {
@@ -127,19 +180,7 @@ pub fn compare(
             ));
             continue;
         };
-        if same_type(&e.db_type, &a.db_type) {
-            enum_diffs(q, &what, &e.db_type, &a.db_type, &mut out);
-        } else {
-            out.push(diff(
-                "QF041",
-                Severity::Error,
-                format!(
-                    "{q}: {what} {} → {}",
-                    fmt_type(&e.db_type),
-                    fmt_type(&a.db_type)
-                ),
-            ));
-        }
+        type_diffs(q, &what, "QF041", &e.db_type, &a.db_type, &mut out);
         if !e.nullable && a.nullable {
             out.push(diff(
                 "QF042",
