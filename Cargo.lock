@@ -614,6 +614,9 @@ dependencies = [
 [[package]]
 name = "qf-sqlfile"
 version = "0.1.0"
+dependencies = [
+ "pg_query",
+]
 
 [[package]]
 name = "queryfirst"
