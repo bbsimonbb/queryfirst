@@ -277,6 +277,11 @@ fn assert_names_target(url: &str, stderr: &str) {
         "no target line in: {stderr}"
     );
     if let Some(pw) = pw.filter(|p| !p.is_empty()) {
+        // Otherwise the check below cannot tell a printed password from the target line.
+        assert!(
+            !url.replace(&format!(":{pw}@"), "@").contains(&pw),
+            "QF_TEST_DATABASE_URL: use a password that is not part of the user, host or database name"
+        );
         assert!(!stderr.contains(&pw), "password printed");
     }
     assert!(!stderr.contains("postgres://"), "connection string printed");

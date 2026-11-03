@@ -12,8 +12,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime};
 
 const FIXTURE: &str = include_str!("../../qf-pg/tests/fixtures/schema.sql");
-/// The password in `QF_TEST_DATABASE_URL` (see env.sh); it must never be printed.
-const PASSWORD: &str = "qftest";
 
 fn database_url() -> String {
     std::env::var("QF_TEST_DATABASE_URL")
@@ -186,7 +184,12 @@ fn qf(dir: &Path, url: Option<&str>, args: &[&str]) -> Out {
         stderr: String::from_utf8(o.stderr).unwrap(),
     };
     let all = out.all();
-    assert!(!all.contains(PASSWORD), "password printed: {all}");
+    if let (_, Some(pw)) = target_and_password(&database_url()) {
+        assert!(
+            pw.is_empty() || !all.contains(&pw),
+            "password printed: {all}"
+        );
+    }
     assert!(
         !all.contains("postgres://"),
         "connection string printed: {all}"
@@ -448,6 +451,11 @@ fn assert_names_target(url: &str, stderr: &str) {
         "no target line in: {stderr}"
     );
     if let Some(pw) = pw.filter(|p| !p.is_empty()) {
+        // Otherwise the check below cannot tell a printed password from the target line.
+        assert!(
+            !url.replace(&format!(":{pw}@"), "@").contains(&pw),
+            "QF_TEST_DATABASE_URL: use a password that is not part of the user, host or database name"
+        );
         assert!(!stderr.contains(&pw), "password printed");
     }
     assert!(!stderr.contains("postgres://"), "connection string printed");

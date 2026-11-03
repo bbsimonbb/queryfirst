@@ -30,7 +30,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-`db-tests` tests require `QF_TEST_DATABASE_URL` (e.g. `postgres://postgres:postgres@localhost:5432/postgres`)
+`db-tests` tests require `QF_TEST_DATABASE_URL` (e.g. `postgres://postgres:secret@localhost:5432/postgres`)
 and **fail, not skip,** when it is missing.
 
 `pg_query` needs libclang to build; on Windows see `README.md#building`.

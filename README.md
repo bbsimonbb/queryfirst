@@ -309,7 +309,7 @@ Install libclang (`sudo apt-get install libclang-dev`; on macOS the Xcode comman
 ## Database tests
 
 ```
-export QF_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
+export QF_TEST_DATABASE_URL=postgres://postgres:secret@localhost:5432/postgres
 cargo test --workspace --features db-tests
 ```
 
