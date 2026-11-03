@@ -3,6 +3,15 @@
   "version": "0.1.0",
   "description": "Queryfirst (qf) native binary for linux-x64",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bbsimonbb/queryfirst.git",
+    "directory": "npm/platforms/linux-x64"
+  },
+  "homepage": "https://github.com/bbsimonbb/queryfirst#readme",
+  "bugs": {
+    "url": "https://github.com/bbsimonbb/queryfirst/issues"
+  },
   "os": [
     "linux"
   ],

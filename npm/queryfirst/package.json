@@ -3,6 +3,15 @@
   "version": "0.1.0",
   "description": "Queryfirst: SQL-first code generation. Write .sql files, get typed code.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bbsimonbb/queryfirst.git",
+    "directory": "npm/queryfirst"
+  },
+  "homepage": "https://github.com/bbsimonbb/queryfirst#readme",
+  "bugs": {
+    "url": "https://github.com/bbsimonbb/queryfirst/issues"
+  },
   "bin": {
     "qf": "bin/qf.js",
     "queryfirst": "bin/qf.js"
