@@ -2,6 +2,7 @@
 
 use qf_meta::{Status, Transform, TypeCategory, TypeRef, from_json, sha256_tag};
 use qf_pg::{Catalog, Described, DescribedColumn, PgQueryError};
+use qf_sqlfile::Severity;
 use queryfirst::cmd::generate::generate_with;
 use queryfirst::config::{Config, parse_config};
 use queryfirst::discover::discover;
@@ -783,4 +784,73 @@ async fn conflict_keeps_query_diagnostics() {
         r.diagnostics
     );
     assert!(r.written.is_empty());
+}
+
+#[tokio::test]
+async fn styled_report_paints_errors_red() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "app/good.psql", GET);
+    write(
+        root,
+        "app/bad.psql",
+        "/* @name bad */\nSELECT id\nFORM customers\n",
+    );
+    let r = run(root, &Config::default(), &[]).await;
+    let red = "\u{1b}[1m\u{1b}[31m";
+    let styled = queryfirst::report::render_human_styled(&r, true);
+    assert!(
+        styled.contains(&format!("{red}app/bad.psql:3:1: error[QF010]")),
+        "{styled:?}"
+    );
+    assert!(
+        styled.contains(&format!("{red}1 error\u{1b}[0m")),
+        "{styled:?}"
+    );
+    // Without colour, and with no errors, there are no escapes at all.
+    assert!(!queryfirst::report::render_human(&r).contains('\u{1b}'));
+    std::fs::remove_file(root.join("app/bad.psql")).unwrap();
+    let r = run(root, &Config::default(), &[]).await;
+    assert_eq!(r.exit_code(), 0);
+    assert!(!queryfirst::report::render_human_styled(&r, true).contains('\u{1b}'));
+}
+
+#[tokio::test]
+async fn generate_streaming_reports_each_query_as_analyzed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "app/good.psql", GET);
+    write(
+        root,
+        "app/bad.psql",
+        "/* @name bad */\nSELECT id\nFORM customers\n",
+    );
+    let cfg = Config::default();
+    let files = discover(root, &cfg, &[]).unwrap();
+    let mut seen = Vec::new();
+    let r = queryfirst::cmd::generate::generate_streaming(
+        root,
+        &cfg,
+        &files,
+        true,
+        &Fake,
+        &Catalog::default(),
+        &mut |a| {
+            let errors = a
+                .diagnostics
+                .iter()
+                .filter(|d| d.severity == Severity::Error);
+            seen.push((a.source.clone(), errors.count()));
+        },
+    )
+    .await;
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            (PathBuf::from("app/bad.psql"), 1),
+            (PathBuf::from("app/good.psql"), 0)
+        ]
+    );
+    assert_eq!(r.exit_code(), 1);
 }

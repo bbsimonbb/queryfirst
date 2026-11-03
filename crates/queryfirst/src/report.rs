@@ -135,22 +135,49 @@ pub(crate) fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
+/// Errors, and the error count in the summary line when it is not zero.
+const ERROR_STYLE: anstyle::Style = anstyle::Style::new()
+    .bold()
+    .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Red)));
+
+/// `text`, in `style` when `color`.
+fn paint(text: &str, style: anstyle::Style, color: bool) -> String {
+    if color {
+        format!("{style}{text}{style:#}")
+    } else {
+        text.to_string()
+    }
+}
+
 /// `path:line:col: error[QFnnn]: message`, then `  hint: …`, then the [`target_line`] and a
 /// summary line.
 pub fn render_human(r: &Report) -> String {
-    let mut out = render_diagnostics(r);
+    render_human_styled(r, false)
+}
+
+/// [`render_human`], with errors in red when `color`.
+pub fn render_human_styled(r: &Report, color: bool) -> String {
+    let mut out = render_diagnostic_list(&r.diagnostics, color);
     out.push_str(&target_line(r.target.as_deref()));
+    out.push_str(&summary_line(r, color));
+    out
+}
+
+/// `Queryfirst <command>: 3 queries, 1 error, 0 warnings; 2 files written, 0 deleted` and a
+/// newline; the error count is red when `color` and there are errors.
+pub fn summary_line(r: &Report, color: bool) -> String {
     let s = &r.summary;
-    out.push_str(&format!(
+    let errors = plural(s.errors, "error", "errors");
+    let errors = paint(&errors, ERROR_STYLE, color && s.errors > 0);
+    format!(
         "Queryfirst {}: {}, {}, {}; {} written, {} deleted\n",
         r.command,
         plural(s.queries, "query", "queries"),
-        plural(s.errors, "error", "errors"),
+        errors,
         plural(s.warnings, "warning", "warnings"),
         plural(s.written, "file", "files"),
         s.deleted
-    ));
-    out
+    )
 }
 
 /// `database: host:port/db` and a newline, so a run against the wrong database is noticed; empty
@@ -161,15 +188,23 @@ pub fn target_line(target: Option<&str>) -> String {
 
 /// Just the diagnostics of [`render_human`], without the summary line.
 pub fn render_diagnostics(r: &Report) -> String {
+    render_diagnostic_list(&r.diagnostics, false)
+}
+
+/// The lines of [`render_diagnostics`] for `diagnostics`, error lines in red when `color`.
+pub fn render_diagnostic_list(diagnostics: &[ReportedDiagnostic], color: bool) -> String {
     let mut out = String::new();
-    for d in &r.diagnostics {
+    for d in diagnostics {
         let sev = severity_str(d.severity);
-        match &d.file {
-            Some(f) if d.line > 0 => out.push_str(&format!("{f}:{}:{}: ", d.line, d.col)),
-            Some(f) => out.push_str(&format!("{f}: ")),
-            None => {}
-        }
-        out.push_str(&format!("{sev}[{}]: {}\n", d.code, d.message));
+        let mut line = match &d.file {
+            Some(f) if d.line > 0 => format!("{f}:{}:{}: ", d.line, d.col),
+            Some(f) => format!("{f}: "),
+            None => String::new(),
+        };
+        line.push_str(&format!("{sev}[{}]: {}", d.code, d.message));
+        let is_error = d.severity == Severity::Error;
+        out.push_str(&paint(&line, ERROR_STYLE, color && is_error));
+        out.push('\n');
         if let Some(h) = &d.hint {
             out.push_str(&format!("  hint: {}\n", h.replace('\n', "\n        ")));
         }
@@ -204,7 +239,8 @@ pub fn to_json(r: &Report) -> Value {
     })
 }
 
-/// Print the report: JSON on stdout with `json`, else human-readable text on stderr.
+/// Print the report: JSON on stdout with `json`, else human-readable text on stderr (in colour
+/// when stderr is a terminal and `NO_COLOR` is not set).
 pub fn print_report(r: &Report, json: bool) {
     if json {
         println!(
@@ -212,6 +248,6 @@ pub fn print_report(r: &Report, json: bool) {
             serde_json::to_string_pretty(&to_json(r)).expect("report serialises")
         );
     } else {
-        eprint!("{}", render_human(r));
+        anstream::eprint!("{}", render_human_styled(r, true));
     }
 }

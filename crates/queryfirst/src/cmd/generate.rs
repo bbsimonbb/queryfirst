@@ -11,9 +11,11 @@ use qf_pg::{
 
 use crate::config::{CONFIG_FILE, Config, load_config};
 use crate::discover::discover;
-use crate::engine::{Describe, analyze_all, apply, plan};
+use crate::engine::{Analyzed, Describe, analyze_all, apply, plan};
 use crate::posix;
-use crate::report::{Report, ReportedDiagnostic, print_report};
+use crate::report::{
+    Report, ReportedDiagnostic, print_report, render_diagnostic_list, summary_line, target_line,
+};
 
 /// How long opening the pool may take before the database counts as unreachable.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -62,6 +64,15 @@ impl Describe for NoDatabase {
     }
 }
 
+/// The report entries for one query's diagnostics.
+fn query_diagnostics(a: &Analyzed) -> Vec<ReportedDiagnostic> {
+    let file = posix(&a.source);
+    a.diagnostics
+        .iter()
+        .map(|d| ReportedDiagnostic::new(Some(&file), d))
+        .collect()
+}
+
 /// The generate pipeline for already discovered `files`, given a describer and catalog.
 /// `whole_project` enables orphan cleanup.
 pub async fn generate_with<D: Describe>(
@@ -72,17 +83,29 @@ pub async fn generate_with<D: Describe>(
     db: &D,
     cat: &Catalog,
 ) -> Report {
+    generate_streaming(project, cfg, files, whole_project, db, cat, &mut |_| {}).await
+}
+
+/// [`generate_with`], calling `on_query` as each query is analyzed (before anything is written).
+pub async fn generate_streaming<D: Describe>(
+    project: &Path,
+    cfg: &Config,
+    files: &[PathBuf],
+    whole_project: bool,
+    db: &D,
+    cat: &Catalog,
+    on_query: &mut dyn FnMut(&Analyzed),
+) -> Report {
     let mut report = Report::new("generate");
     report.summary.queries = files.len();
-    match analyze_all(project, cfg, files, db, cat).await {
+    match analyze_all(project, cfg, files, db, cat, on_query).await {
         Err(e) => report.push(connection_diagnostic(&e)),
         Ok(mut analyzed) => {
             let planned = plan(project, cfg, &mut analyzed, whole_project);
             // Query diagnostics are reported even when the plan fails.
             for a in &analyzed {
-                let file = posix(&a.source);
-                for d in &a.diagnostics {
-                    report.push(ReportedDiagnostic::new(Some(&file), d));
+                for d in query_diagnostics(a) {
+                    report.push(d);
                 }
             }
             match planned.and_then(|p| apply(project, &p)) {
@@ -104,8 +127,14 @@ fn fatal(mut report: Report, d: ReportedDiagnostic) -> Report {
     report
 }
 
-/// Everything up to the report: config, discovery, connection, the pipeline.
-pub fn generate_report(project: &Path, paths: &[PathBuf], db: Option<&str>) -> Report {
+/// Everything up to the report: config, discovery, connection, the pipeline. `on_query` as for
+/// [`generate_streaming`].
+pub fn generate_report(
+    project: &Path,
+    paths: &[PathBuf],
+    db: Option<&str>,
+    on_query: &mut dyn FnMut(&Analyzed),
+) -> Report {
     let mut report = Report::new("generate");
     let cfg = match load_config(project) {
         Ok(c) => c,
@@ -158,15 +187,45 @@ pub fn generate_report(project: &Path, paths: &[PathBuf], db: Option<&str>) -> R
             Ok(c) => c,
             Err(e) => return fatal(report, connection_diagnostic(&e)),
         };
-        let mut done = generate_with(project, &cfg, &files, whole_project, &pool, &cat).await;
+        let mut done =
+            generate_streaming(project, &cfg, &files, whole_project, &pool, &cat, on_query).await;
         done.target = report.target;
         done
     })
 }
 
-/// Run `qf generate`, print the report and return the exit code.
+/// Run `qf generate`, print the report and return the exit code. Without `json`, each query's
+/// diagnostics are printed as soon as it is analyzed; the rest of the report follows at the end.
 pub fn run(project: &Path, paths: &[PathBuf], db: Option<&str>, json: bool) -> u8 {
-    let report = generate_report(project, paths, db);
-    print_report(&report, json);
+    if json {
+        let report = generate_report(project, paths, db, &mut |_| {});
+        print_report(&report, true);
+        return report.exit_code();
+    }
+    let mut printed: Vec<ReportedDiagnostic> = Vec::new();
+    let report = generate_report(project, paths, db, &mut |a| {
+        let ds = query_diagnostics(a);
+        anstream::eprint!("{}", render_diagnostic_list(&ds, true));
+        printed.extend(ds);
+    });
+    // Whatever was not streamed: plan and write errors, generator errors, connection trouble.
+    let rest: Vec<ReportedDiagnostic> = report
+        .diagnostics
+        .iter()
+        .filter(|d| match printed.iter().position(|p| p == *d) {
+            Some(i) => {
+                printed.swap_remove(i);
+                false
+            }
+            None => true,
+        })
+        .cloned()
+        .collect();
+    anstream::eprint!(
+        "{}{}{}",
+        render_diagnostic_list(&rest, true),
+        target_line(report.target.as_deref()),
+        summary_line(&report, true)
+    );
     report.exit_code()
 }

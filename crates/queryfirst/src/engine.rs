@@ -772,12 +772,14 @@ pub async fn analyze_text<D: Describe>(
 
 /// Analyze `files` (project-relative) concurrently, at most `cfg.pool` at a time. Results are in
 /// the order of `files`. The first connection error aborts everything still in flight.
+/// `on_query` sees each query as soon as it is analyzed, in completion order.
 pub async fn analyze_all<D: Describe>(
     project: &Path,
     cfg: &Config,
     files: &[PathBuf],
     db: &D,
     cat: &Catalog,
+    on_query: &mut dyn FnMut(&Analyzed),
 ) -> Result<Vec<Analyzed>, ConnError> {
     let mut stream = futures_util::stream::iter(
         files
@@ -789,7 +791,9 @@ pub async fn analyze_all<D: Describe>(
     let mut done = Vec::with_capacity(files.len());
     while let Some((i, r)) = stream.next().await {
         // Returning drops the stream, cancelling the describes still running.
-        done.push((i, r?));
+        let a = r?;
+        on_query(&a);
+        done.push((i, a));
     }
     done.sort_by_key(|(i, _)| *i);
     Ok(done.into_iter().map(|(_, a)| a).collect())
