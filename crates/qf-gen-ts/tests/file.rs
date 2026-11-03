@@ -140,7 +140,7 @@ fn returns_one_wraps() {
         c.starts_with(concat!(
             "/** Types generated for queries found in \"app/api/(shared-queries)/address.psql\" */\n",
             "import { PreparedQuery } from '@pgtyped/runtime';\n",
-            "import { one } from 'queryfirst-runtime';\n\n"
+            "import { one } from '@queryfirst/runtime';\n\n"
         )),
         "{c}"
     );
@@ -149,7 +149,7 @@ fn returns_one_wraps() {
         "IAddressBelongsToAccountResult>(addressBelongsToAccountIR), \"addressBelongsToAccount\");\n\n\n"
     )));
     m.returns = Some(Returns::Maybe);
-    assert!(gen_ok(&m).contains("import { maybe } from 'queryfirst-runtime';"));
+    assert!(gen_ok(&m).contains("import { maybe } from '@queryfirst/runtime';"));
     m.returns = Some(Returns::None);
     assert!(gen_ok(&m).contains("= none(new PreparedQuery<"));
 }
@@ -161,7 +161,7 @@ fn returns_absent_plain() {
         m.returns = r;
         let c = gen_ok(&m);
         assert!(c.contains(PLAIN));
-        assert!(!c.contains("queryfirst-runtime"));
+        assert!(!c.contains("@queryfirst/runtime"));
         assert_eq!(c, GOLDEN);
     }
 }

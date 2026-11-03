@@ -260,7 +260,7 @@ ORDER BY I."createdAt" desc
   file and `qf test` still checks it.
 - **`@returns one | maybe | many | none`**: absent means pgtyped's array. `one` returns the row
   (throws unless exactly one), `maybe` the row or `null`, `none` nothing. These wrap the query with
-  the small `queryfirst-runtime` package, which the project then depends on.
+  the small `@queryfirst/runtime` package, which the project then depends on.
 
 ## Migrating from pgtyped
 

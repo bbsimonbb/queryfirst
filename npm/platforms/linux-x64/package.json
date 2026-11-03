@@ -1,5 +1,5 @@
 {
-  "name": "queryfirst-linux-x64",
+  "name": "@queryfirst/cli-linux-x64",
   "version": "0.1.0",
   "description": "Queryfirst (qf) native binary for linux-x64",
   "license": "MIT",

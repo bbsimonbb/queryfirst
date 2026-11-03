@@ -31,23 +31,23 @@ const write = (p, j) => writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
 
 const main = readJson(join(root, "npm/queryfirst/package.json"));
 main.version = version;
-for (const p of platforms) main.optionalDependencies[`queryfirst-${p}`] = version;
+for (const p of platforms) main.optionalDependencies[`@queryfirst/cli-${p}`] = version;
 
 const log = (s) => console.log(s);
 log(`version ${version}${dryRun ? " (dry run, nothing written)" : ""}`);
 log(`out: ${out}`);
 log(`queryfirst@${version}`);
 log("  bin/qf.js, README.md, queryfirst.schema.json, qf-meta.v1.schema.json");
-for (const p of platforms) log(`  optionalDependency queryfirst-${p}@${version}`);
+for (const p of platforms) log(`  optionalDependency @queryfirst/cli-${p}@${version}`);
 
 const exeName = (p) => (p.startsWith("win32") ? "qf.exe" : "qf");
 const srcBinary = (p) => binDir && join(binDir, p.startsWith("win32") ? `qf-${p}.exe` : `qf-${p}`);
 for (const p of platforms) {
   const src = srcBinary(p);
   const state = src && existsSync(src) ? `binary ${src}` : "no binary (skipped)";
-  log(`queryfirst-${p}@${version}\n  bin/${exeName(p)}  <- ${state}`);
+  log(`@queryfirst/cli-${p}@${version} (staged as queryfirst-${p}/)\n  bin/${exeName(p)}  <- ${state}`);
 }
-log(`queryfirst-runtime@${version}\n  published from npm/queryfirst-runtime (workflow stamps the version; prepack builds dist)`);
+log(`@queryfirst/runtime@${version}\n  published from npm/queryfirst-runtime (workflow stamps the version; prepack builds dist)`);
 
 if (!dryRun) {
   rmSync(out, { recursive: true, force: true });

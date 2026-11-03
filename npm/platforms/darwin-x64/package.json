@@ -1,5 +1,5 @@
 {
-  "name": "queryfirst-darwin-x64",
+  "name": "@queryfirst/cli-darwin-x64",
   "version": "0.1.0",
   "description": "Queryfirst (qf) native binary for darwin-x64",
   "license": "MIT",

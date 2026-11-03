@@ -284,7 +284,7 @@ Context: simplyfirst's API routes are thin. Query results go over the wire uncha
 
 ## 15. Distribution
 
-- npm package `queryfirst` (unclaimed as of 2026-10-30), with per-platform binary packages as optionalDependencies (Biome-style). It installs a `qf` bin. An unrelated npm package already uses the name `qf`, so docs say `npx queryfirst` for one-off use, and `qf` once the package is installed as a dev dependency.
+- npm package `queryfirst` (unclaimed as of 2026-10-30), with per-platform binary packages as optionalDependencies (Biome-style), named `@queryfirst/cli-<os>-<cpu>` (npm's spam filter rejected the unscoped `queryfirst-<os>-<cpu>` names on 2026-11-03). It installs a `qf` bin. An unrelated npm package already uses the name `qf`, so docs say `npx queryfirst` for one-off use, and `qf` once the package is installed as a dev dependency.
 - GitHub release binaries: win-x64, linux-x64, linux-arm64, darwin-x64, darwin-arm64.
 - Rust's minimum supported version and the crate choices are the builder's call.
 

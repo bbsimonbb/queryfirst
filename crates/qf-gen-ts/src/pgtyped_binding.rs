@@ -78,7 +78,7 @@ pub fn meta_ir(meta: &QueryMeta) -> Value {
 impl RuntimeBinding for PgtypedBinding {
     fn imports(&self, meta: &QueryMeta) -> Vec<String> {
         wrapper(meta)
-            .map(|w| format!("import {{ {w} }} from 'queryfirst-runtime';"))
+            .map(|w| format!("import {{ {w} }} from '@queryfirst/runtime';"))
             .into_iter()
             .collect()
     }

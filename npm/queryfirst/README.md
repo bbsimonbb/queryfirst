@@ -9,8 +9,8 @@ npx qf generate
 ```
 
 This package is a thin launcher. The native `qf` binary ships in a per-platform package
-(`queryfirst-win32-x64`, `queryfirst-linux-x64`, `queryfirst-linux-arm64`,
-`queryfirst-darwin-x64`, `queryfirst-darwin-arm64`) that npm installs automatically as an
+(`@queryfirst/cli-win32-x64`, `@queryfirst/cli-linux-x64`, `@queryfirst/cli-linux-arm64`,
+`@queryfirst/cli-darwin-x64`, `@queryfirst/cli-darwin-arm64`) that npm installs automatically as an
 optional dependency. Linux binaries are static (musl) builds.
 
 Also shipped:
@@ -18,4 +18,4 @@ Also shipped:
 - `queryfirst.schema.json`: JSON Schema for `queryfirst.json` (`qf init` references it).
 - `qf-meta.v1.schema.json`: JSON Schema of the metadata that `qf` passes to external generators, for generator authors.
 
-For the TypeScript runtime helpers used by generated code, see `queryfirst-runtime`.
+For the TypeScript runtime helpers used by generated code, see `@queryfirst/runtime`.

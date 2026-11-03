@@ -1,5 +1,5 @@
 {
-  "name": "queryfirst-runtime",
+  "name": "@queryfirst/runtime",
   "version": "0.1.0",
   "description": "Result-cardinality wrappers (one/maybe/none) for Queryfirst-generated pgtyped queries",
   "license": "MIT",

@@ -12,7 +12,7 @@ const STUBS: &str = r#"declare module '@pgtyped/runtime' {
     run(params: TParamType): Promise<TResultType[]>;
   }
 }
-declare module 'queryfirst-runtime' {
+declare module '@queryfirst/runtime' {
   import { PreparedQuery } from '@pgtyped/runtime';
   export function one<P, R>(q: PreparedQuery<P, R>, name: string): (params: P) => Promise<R>;
   export function maybe<P, R>(q: PreparedQuery<P, R>, name: string): (params: P) => Promise<R | undefined>;

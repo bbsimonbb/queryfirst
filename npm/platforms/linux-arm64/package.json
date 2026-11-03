@@ -1,5 +1,5 @@
 {
-  "name": "queryfirst-linux-arm64",
+  "name": "@queryfirst/cli-linux-arm64",
   "version": "0.1.0",
   "description": "Queryfirst (qf) native binary for linux-arm64",
   "license": "MIT",

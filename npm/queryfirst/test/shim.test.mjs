@@ -7,7 +7,7 @@ import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const shim = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "qf.js");
-const pkgName = `queryfirst-${process.platform}-${process.arch}`;
+const pkgName = `@queryfirst/cli-${process.platform}-${process.arch}`;
 const exe = process.platform === "win32" ? "qf.exe" : "qf";
 
 // The fake platform package holds a real child process "binary" that prints a marker and

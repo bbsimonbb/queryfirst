@@ -4,7 +4,7 @@
 const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 
-const pkg = `queryfirst-${process.platform}-${process.arch}`;
+const pkg = `@queryfirst/cli-${process.platform}-${process.arch}`;
 const exe = process.platform === "win32" ? "qf.exe" : "qf";
 
 let pkgJson;
